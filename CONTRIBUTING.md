@@ -70,6 +70,10 @@ All contributions must pass with zero type errors.
   downloader threads internally, so `--workers 1` caps total download
   concurrency at two requests and is the safest default when reproducing
   failures or filling gaps.
+- HistData.com is a free service: keep its requests strictly sequential per
+  instrument (one month zip per request, with a pause between months) and
+  never parallelise them within a symbol. Tests must not touch either network;
+  stub `histdata._fetch_month_zip` or the session as the existing tests do.
 - When exporter, cache-normalization, or probe logic changes, rerun the
   maintainer audit scripts in `scripts/` against a populated cache:
   `dukascopy_audit.py` for local gap/DST/spread/stale checks and

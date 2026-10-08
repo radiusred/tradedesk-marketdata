@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "tradedesk-marketdata"
 dynamic = ["version"]
-description = "Market data downloader and candle/tick exporter for backtesting workflows (Dukascopy today; more sources to come)."
+description = "Market data downloader and candle/tick exporter for backtesting workflows (Dukascopy and HistData.com)."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -16,7 +16,7 @@ authors = [
 maintainers = [
   { name = "Radius Red Ltd.", email = "opensource@radiusred.uk" }
 ]
-keywords = ["market-data", "dukascopy", "ticks", "candles", "backtesting", "trading"]
+keywords = ["market-data", "dukascopy", "histdata", "ticks", "candles", "backtesting", "trading"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",

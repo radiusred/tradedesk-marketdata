@@ -10,8 +10,10 @@
 
 This tool downloads raw tick data, converts it into clean, deterministic CSV
 candle files, and writes a metadata sidecar describing exactly how the data was
-produced. Dukascopy's public datafeed is the first source; the cache layout and
-candle conventions are source-agnostic so that others can be added.
+produced. Two tick sources are supported, Dukascopy's public datafeed (the
+default) and HistData.com's monthly tick files (`--source histdata`); both
+write the same cache, so the candle files look the same whichever source
+produced a day (see [Sources](#sources)).
 
 It is designed to be run once per dataset, not repeatedly during backtests.
 
@@ -55,6 +57,135 @@ data/
 
 You can now point your backtest engine at the bid or ask CSV directly, depending
 on which price side you want to replay.
+
+---
+
+## Sources
+
+`--source` picks where the ticks come from. Both sources feed the same
+pipeline from the tick onwards, so they write identical day files
+(`{cache}/{SYMBOL}/{YYYY}/{MM0}/{DD}_bid.csv.zst` and `_ask.csv.zst`, the same
+columns, UTC timestamps, zstd level and atomic commit) under the cache's symbol
+names, and the same range CSVs and sidecars.
+
+| | Dukascopy (`--source dukascopy`, default) | HistData.com (`--source histdata`) |
+|---|---|---|
+| Unit fetched | one `.bi5` file per instrument-hour | one zip per instrument-month |
+| Coverage | varies per instrument | FX majors from 2000, GBPJPY 2002, XAUUSD 2009, the indices from 2010-11 (see the table below) |
+| Prices | bid and ask per tick, with tick volume | bid and ask per tick; **no volume** (candle `volume` is `0.0`) |
+| Timestamps | UTC | EST without daylight saving (fixed UTC-5), converted to UTC on decode |
+| Scaling | `--price-divisor` | per-symbol scale in the symbol table; `--price-divisor` is refused |
+| Speed and limits | heavily rate-limited; years of history take a very long time | ~190 requests for an index's whole history; sequential, one month at a time |
+
+### HistData.com
+
+[HistData.com](https://www.histdata.com/) publishes free "Generic ASCII" tick
+files, one zip per instrument and month, each tick a
+`YYYYMMDD HHMMSSNNN,bid,ask,volume` line in EST without daylight-saving
+changes. It is a free service run for traders' own research and backtesting,
+not a licensed commercial feed: use it for personal backtesting, do not
+redistribute its files, and check its site for its current terms. The
+exporter treats it accordingly: requests for one instrument are strictly
+sequential, one month zip per request with a pause between months, under a
+descriptive User-Agent; keep `--workers 1` when exporting several symbols so
+the whole run stays one request at a time. Each download loads the month's page
+for a fresh download token, then posts the page's download form, honouring
+`--connect-timeout`, `--read-timeout` and `--retries` per month.
+
+```bash
+tradedesk-md-export --source histdata --symbols USA500IDXUSD \
+  --from 2010-11-01 --to 2019-12-31 \
+  --cache-dir ./cache --workers 1
+```
+
+Symbol table (`tradedesk_marketdata.histdata.HISTDATA_SYMBOLS`). The cache
+stores Dukascopy's raw units, which downstream `raw_scale` settings depend on,
+so HistData's decimal prices are multiplied by the symbol's scale on decode
+(EURUSD `1.10366` is stored as `11036.6`, GBPJPY `179.601` as `17960.1`,
+XAUUSD `$2063.625` as `206362.5`, indices in points):
+
+| Cache symbol | HistData | Scale | First month |
+|---|---|---|---|
+| USA500IDXUSD | SPXUSD | 1 | 2010-11 |
+| DEUIDXEUR | GRXEUR | 1 | 2010-11 |
+| GBRIDXGBP | UKXGBP | 1 | 2010-11 |
+| JPNIDXJPY | JPXJPY | 1 | 2010-11 |
+| AUSIDXAUD | AUXAUD | 1 | 2010-11 |
+| BRENTCMDUSD | BCOUSD | 1 | 2010-11 |
+| XAUUSD | XAUUSD | 100 | 2009-03 |
+| EURUSD, GBPUSD, USDCHF | same | 10000 | 2000-05 |
+| AUDUSD, USDCAD | same | 10000 | 2000-06 |
+| USDJPY | USDJPY | 100 | 2000-05 |
+| GBPJPY | GBPJPY | 100 | 2002-05 |
+| AUDJPY, CHFJPY | same | 100 | 2002-08 |
+| EURCHF, EURGBP | same | 10000 | 2002-03 |
+| GBPCHF | GBPCHF | 10000 | 2002-08 |
+| EURCAD | EURCAD | 10000 | 2007-03 |
+| AUDCAD | AUDCAD | 10000 | 2007-07 |
+| AUDNZD, GBPAUD | same | 10000 | 2007-09 |
+| NZDCAD | NZDCAD | 10000 | 2008-03 |
+| EURSEK | EURSEK | 10000 | 2008-08 |
+
+A symbol that is not in the table is refused before anything is downloaded.
+The scale is recorded with every day (below) and in the sidecar (`source:
+"histdata"`, `price_divisor` = 1/scale, `params.scale_factor` = scale), and the
+write-time scale sentry still refuses a day whose scale disagrees with its
+neighbours in the cache.
+
+How a HistData run fills the cache:
+
+- **Months.** A HistData month covers UTC 05:00 on the 1st to 05:00 on the
+  1st of the next month, so the 1st of a month also needs the previous month's
+  file. A month whose days are all committed already is skipped without a
+  request; a month before the instrument's first month is skipped with a log
+  line. A month's zip is kept under `{cache}/{SYMBOL}/_histdata/{YYYY}{MM}.zip`
+  while any day it covers is uncommitted, so the next run reuses it, and is
+  deleted once they all are. A corrupt zip is fetched again.
+- **Settled months.** HistData updates the running month's file from time to
+  time, so a month's file is treated as final only once the month ended at
+  least `--commit-partial-after-days` days ago (default 7). Until then a day is
+  committed only if ticks after it exist, and the zip is not kept. A zip that
+  was downloaded before its month settled is fetched again.
+- **Empty and partial days** (where this differs from Dukascopy). A day without
+  ticks (weekend, holiday, outage) is committed as an empty day, as Dukascopy
+  weekends are, when the file shows ticks on both sides of it, or ticks before
+  it and a settled month. Days before an instrument's first tick are never
+  committed. A day that needs a month HistData has no file for is retried
+  until that month has settled, then committed from the ticks it has and
+  recorded in `_partial_days.jsonl` with `gap_reason`
+  `histdata_month_unavailable` and the missing UTC hours. A month that fails to
+  download after `--retries` is not a gap: its days stay uncommitted for the
+  next run and the month is listed in the end-of-run summary (Dukascopy instead
+  treats an hour that keeps failing like a 404 and may partial-commit around
+  it).
+
+### Cache precedence and provenance
+
+**First committed wins:** a day that already has both candle files is never
+rewritten, by either source. To replace a day, delete its two files and
+re-export it.
+
+Every committed day is recorded in the symbol's append-only
+`{cache}/{SYMBOL}/_sources.jsonl`:
+
+```json
+{"day": "2015-01-02", "source": "histdata", "scale_factor": 1.0, "committed_at": "2026-10-08T22:35:49.508169+00:00", "source_unit": "HISTDATA_COM_ASCII_SPXUSD_T201501.zip"}
+{"day": "2020-01-02", "source": "dukascopy", "scale_factor": 0.1, "committed_at": "...", "source_unit": "EURUSD/2020/00/02/00h-23h_ticks.bi5"}
+```
+
+`scale_factor` is the multiplier from the source's price to the cache's units
+(1/`--price-divisor` for Dukascopy's int32 ticks); `source_unit` names the month
+zip(s) or the hour set the day was built from. Days committed before this
+manifest existed have no record and were written by Dukascopy.
+
+### Splicing sources
+
+HistData and Dukascopy are different liquidity providers. A series that is
+HistData up to some day and Dukascopy after it carries the basis between the
+two at the join, and the two can differ in tick granularity and session
+coverage, so check the basis before trusting a spliced series:
+`scripts/histdata_splice_check.py` (below) compares daily closes of both
+sources over an overlap.
 
 ---
 
@@ -164,7 +295,7 @@ runs that used different `--price-divisor` values.
 
 ## Data-quality audit scripts
 
-The repository also ships three maintainer-oriented audit scripts under
+The repository also ships four maintainer-oriented audit scripts under
 `scripts/` for checking whether an existing local candle cache still looks
 healthy after exporter changes or upstream Dukascopy drift.
 
@@ -216,6 +347,25 @@ Example:
 ```bash
 python scripts/audit_fx_scale.py NZDUSD --cache-dir ./cache --min 0.30 --max 2.00
 python scripts/audit_fx_scale.py NZDUSD --cache-dir ./cache --print-dates
+```
+
+`scripts/histdata_splice_check.py` measures the basis between HistData and
+Dukascopy before you splice them. A cache holds one source per day, so the
+overlap comes from a second cache that a `--source histdata` run filled over
+dates the main cache has from Dukascopy (HistData covers 2020 onwards too).
+Per day it compares the mid close of both sources at the last minute at or
+before 21:00 UTC that both have, and reports bias, mean and median absolute
+difference, the largest divergence and Pearson r, in cache units and percent,
+plus the days in the main cache where the recorded source changes.
+
+```bash
+tradedesk-md-export --source histdata --symbols USA500IDXUSD \
+  --from 2020-01-01 --to 2020-12-31 --cache-dir ./cache-histdata --workers 1
+python scripts/histdata_splice_check.py \
+  --cache ./cache --histdata-cache ./cache-histdata \
+  --instruments USA500IDXUSD \
+  --start 2020-01-01 --end 2020-12-31 \
+  --out /tmp/histdata_splice.json
 ```
 
 These scripts are intended for maintainers validating cached data quality, not
@@ -277,9 +427,9 @@ to fill cache gaps caused by failed hours.
 
 ### Interrupting a run
 
-One Ctrl-C cancels: queued hours are dropped, each in-flight request ends at
-its next timeout or retry, and the exporter exits 130 once those have
-returned (at most one read timeout). A second Ctrl-C exits 130 immediately
+One Ctrl-C cancels: queued hours (or HistData months) are dropped, each
+in-flight request ends at its next timeout, retry or download chunk, and the
+exporter exits 130 once those have returned (at most one read timeout). A second Ctrl-C exits 130 immediately
 without waiting. Every cache write is atomic, so an interrupted run leaves
 nothing half-written and the next run picks up where it stopped.
 
@@ -287,8 +437,8 @@ nothing half-written and the next run picks up where it stopped.
 
 Every datafeed request waits `--connect-timeout` seconds (default `2`) for a
 connection and `--read-timeout` seconds (default `10`) for the answer, and an
-hour is attempted `--retries` times (default `3`, with exponential backoff)
-before it is skipped for this run. Under load the datafeed can take 20 s or
+hour (a month, for HistData) is attempted `--retries` times (default `3`, with
+exponential backoff) before it is skipped for this run. Under load the datafeed can take 20 s or
 more to deliver a single hour, so a run that logs mostly timeouts is usually
 giving up on answers that were on their way; raising the read timeout (and
 keeping `--workers 1`) recovers them, and costs nothing when the datafeed is
@@ -398,7 +548,7 @@ will not emit the final range-level output CSVs in `--out`.
 ## Requirements
 
 - Python 3.11+
-- Internet access to Dukascopy datafeed
+- Internet access to the Dukascopy datafeed or HistData.com
 
 ## Credentials and Release Automation
 
