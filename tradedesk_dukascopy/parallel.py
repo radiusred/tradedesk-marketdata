@@ -2,7 +2,6 @@
 
 import logging
 import sys
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -18,8 +17,9 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from .cancel import cancellation as _cancellation_event
+
 log = logging.getLogger(__name__)
-_cancellation_event = threading.Event()
 
 
 @dataclass
@@ -134,7 +134,8 @@ def run_parallel_exports(
     except KeyboardInterrupt:
         _cancellation_event.set()
         log.warning(
-            "Interrupted - cancelling in-progress downloads: this can take some time to complete..."
+            "Interrupted - cancelling: queued hours are dropped and in-flight requests "
+            "end at their next timeout; press Ctrl-C again to exit without waiting"
         )
         executor.shutdown(wait=False, cancel_futures=True)
         raise

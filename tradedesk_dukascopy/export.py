@@ -48,6 +48,7 @@ import requests  # type: ignore[import-untyped]
 import zstandard as zstd
 from rich.progress import Progress
 
+from .cancel import cancellation, check_cancelled
 from .scale_sentry import check_scale_consistency
 
 BASE_URL = "https://datafeed.dukascopy.com/datafeed"
@@ -144,6 +145,10 @@ def _download_bi5(
     We cache empty payloads as empty files so repeated exports do not re-download them.
 
     Uses exponential backoff on retries: 0.5s, 1.0s, 2.0s, 4.0s (capped).
+
+    Raises KeyboardInterrupt as soon as a cancel is pending: before each attempt
+    and from inside a backoff sleep, so a cancelled export never starts another
+    request or sits out a backoff.
     """
     # If cached, return it even if it's 0 bytes (0 bytes means "no ticks for this hour")
     if cache_path is not None and cache_path.exists():
@@ -153,6 +158,7 @@ def _download_bi5(
     delay = RETRY_BASE_DELAY
 
     for attempt in range(1, retries + 1):
+        check_cancelled()
         try:
             with _SESSION.get(url, timeout=timeout) as r:
                 if r.status_code == 404:
@@ -188,11 +194,10 @@ def _download_bi5(
             last_exc = e
             log.debug("download attempt %d/%d failed for %s: %s", attempt, retries, url, e)
 
-            # Backoff before retry (but not after final attempt)
+            # Backoff before retry (but not after final attempt); a cancel ends the sleep early
             if attempt < retries:
-                import time
-
-                time.sleep(delay)
+                if cancellation.wait(delay):
+                    raise KeyboardInterrupt() from None
                 delay = min(delay * RETRY_BACKOFF_FACTOR, RETRY_MAX_DELAY)
 
     log.warning("skipping %s after %d failed attempts (%s)", url, retries, last_exc)
@@ -824,6 +829,7 @@ def export_range(
     def download_hour(hour_start: datetime) -> tuple[datetime, bytes | None]:
         """Download a single hour's tick data."""
         try:
+            check_cancelled()
             url = _dukascopy_tick_url(symbol, hour_start)
             cache_path = None
             if cache_dir is not None:
@@ -1133,24 +1139,29 @@ def export_range(
             if is_last_hour_of_day:
                 _flush_day(current_day)
 
+    # Not a `with` block: its exit would call shutdown(wait=True) and drain every
+    # queued hour before returning, which is what kept a cancelled export running.
+    executor = ThreadPoolExecutor(max_workers=DOWNLOAD_THREADS_PER_INSTRUMENT)
+    interrupted = False
     try:
-        with ThreadPoolExecutor(max_workers=DOWNLOAD_THREADS_PER_INSTRUMENT) as executor:
-            futures = {executor.submit(download_hour, h): h for h in hours_to_download}
+        futures = {executor.submit(download_hour, h): h for h in hours_to_download}
 
-            for future in as_completed(futures):
-                from tradedesk_dukascopy.parallel import _cancellation_event
+        for future in as_completed(futures):
+            check_cancelled()
 
-                if _cancellation_event.is_set():
-                    raise KeyboardInterrupt()
+            hour_start, comp = future.result()
+            hour_data[hour_start] = comp
 
-                hour_start, comp = future.result()
-                hour_data[hour_start] = comp
-
-                _process_ready_hours()
+            _process_ready_hours()
 
     except KeyboardInterrupt:
+        interrupted = True
         log.warning(f"{symbol}: download interrupted")
         raise
+    finally:
+        # On a cancel, drop the queued hours and return at once; the in-flight
+        # requests end at their next timeout or cancel check.
+        executor.shutdown(wait=not interrupted, cancel_futures=interrupted)
 
     # Flush any remaining hours (e.g. all days were cached, no futures ran)
     _process_ready_hours()

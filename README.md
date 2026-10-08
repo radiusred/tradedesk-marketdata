@@ -270,6 +270,14 @@ to stay near the safest limit of two concurrent download threads, keep
 `--workers 1`. Re-running the same command is idempotent and is the intended way
 to fill cache gaps caused by failed hours.
 
+### Interrupting a run
+
+One Ctrl-C cancels: queued hours are dropped, each in-flight request ends at
+its next timeout or retry, and the exporter exits 130 once those have
+returned (at most one read timeout). A second Ctrl-C exits 130 immediately
+without waiting. Every cache write is atomic, so an interrupted run leaves
+nothing half-written and the next run picks up where it stopped.
+
 ### Timeouts and retries (`--connect-timeout`, `--read-timeout`, `--retries`)
 
 Every datafeed request waits `--connect-timeout` seconds (default `2`) for a

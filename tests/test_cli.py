@@ -186,3 +186,67 @@ def test_main_rejects_non_positive_timeouts_and_zero_retries() -> None:
         cli.main(base + ["--connect-timeout", "-1"])
     with pytest.raises(SystemExit):
         cli.main(base + ["--retries", "0"])
+
+
+def test_main_waits_for_export_threads_after_interrupt(monkeypatch) -> None:
+    waited: list[bool] = []
+
+    def interrupted_run(tasks, max_workers):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(par, "run_parallel_exports", interrupted_run)
+    monkeypatch.setattr(cli, "_wait_for_export_threads", lambda _log: waited.append(True))
+
+    rc = cli.main(
+        ["--symbols", "EURUSD", "--from", "2025-07-01", "--to", "2025-07-01", "--no-cache"]
+    )
+
+    assert rc == 130
+    assert waited == [True]
+
+
+def test_wait_for_export_threads_second_interrupt_exits_130(monkeypatch) -> None:
+    import os
+    import threading
+
+    class HungThread:
+        daemon = False
+
+        def join(self):
+            raise KeyboardInterrupt()
+
+    exit_codes: list[int] = []
+
+    def fake_exit(code):
+        exit_codes.append(code)
+        raise SystemExit(code)  # os._exit never returns; stop the test here too
+
+    monkeypatch.setattr(threading, "enumerate", lambda: [threading.current_thread(), HungThread()])
+    monkeypatch.setattr(os, "_exit", fake_exit)
+
+    import pytest
+
+    with pytest.raises(SystemExit):
+        cli._wait_for_export_threads(logging.getLogger("test"))
+    assert exit_codes == [130]
+
+
+def test_probe_returns_130_on_interrupt(monkeypatch) -> None:
+    def interrupted_export_range(**_):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(cli, "export_range", interrupted_export_range)
+
+    rc = cli.main(
+        [
+            "--symbols",
+            "EURUSD",
+            "--from",
+            "2025-07-01",
+            "--to",
+            "2025-07-01",
+            "--probe",
+            "--no-cache",
+        ]
+    )
+    assert rc == 130

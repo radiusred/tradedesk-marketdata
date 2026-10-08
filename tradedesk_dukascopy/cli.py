@@ -1,7 +1,9 @@
 import argparse
 import logging
+import os
 import sys
 import tempfile
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -162,6 +164,26 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _wait_for_export_threads(log: logging.Logger) -> None:
+    """After a cancel, wait for the export threads to finish their in-flight work.
+
+    Without this the interpreter joins them at exit, where a second Ctrl-C
+    surfaces as a traceback and exit code 1. Here a second Ctrl-C exits at once
+    with 130. Every cache write is atomic (temp file + rename), so nothing is
+    left half-written.
+    """
+    try:
+        for t in threading.enumerate():
+            if t is not threading.current_thread() and not t.daemon:
+                t.join()
+    except KeyboardInterrupt:
+        log.warning("Interrupted again - exiting without waiting for in-flight downloads")
+        logging.shutdown()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(130)
+
+
 def _parse_ymd(s: str) -> datetime:
     # Accept YYYY-MM-DD
     dt = datetime.strptime(s.strip(), "%Y-%m-%d")
@@ -203,19 +225,22 @@ def main(argv: list[str] | None = None) -> int:
 
         symbol = args.symbols[0]
 
-        export_range(
-            symbol=symbol,
-            start_utc=start_utc,
-            end_utc_inclusive=end_utc,
-            resample_rule=args.resample,
-            price_divisor=args.price_divisor,
-            cache_dir=None if args.no_cache else args.cache_dir,
-            probe=True,
-            probe_ticks=args.probe_ticks,
-            out=Path(tempfile.gettempdir()),
-            timeout=timeout,
-            retries=args.retries,
-        )
+        try:
+            export_range(
+                symbol=symbol,
+                start_utc=start_utc,
+                end_utc_inclusive=end_utc,
+                resample_rule=args.resample,
+                price_divisor=args.price_divisor,
+                cache_dir=None if args.no_cache else args.cache_dir,
+                probe=True,
+                probe_ticks=args.probe_ticks,
+                out=Path(tempfile.gettempdir()),
+                timeout=timeout,
+                retries=args.retries,
+            )
+        except KeyboardInterrupt:
+            return 130
 
         return 0
 
@@ -285,4 +310,5 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
     except KeyboardInterrupt:
+        _wait_for_export_threads(log)
         return 130
