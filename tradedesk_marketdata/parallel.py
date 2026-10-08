@@ -36,6 +36,7 @@ class ExportTask:
     commit_partial_after_days: int = 7
     timeout: tuple[float, float] | None = None
     retries: int | None = None
+    source: str = "dukascopy"
 
 
 @dataclass
@@ -61,6 +62,26 @@ def _export_worker(task: ExportTask, progress: Progress | None = None) -> Export
         network["retries"] = task.retries
 
     try:
+        if task.source == "histdata":
+            from tradedesk_marketdata.histdata import export_range_histdata
+
+            bid_csv, ask_csv = export_range_histdata(
+                symbol=task.symbol,
+                start_utc=task.start_utc,
+                end_utc_inclusive=task.end_utc_inclusive,
+                resample_rule=task.resample_rule,
+                cache_dir=task.cache_dir,
+                commit_partial_after_days=task.commit_partial_after_days,
+                out=task.out,
+                progress=progress,
+                **network,  # type: ignore[arg-type]
+            )
+            return ExportResult(
+                symbol=task.symbol,
+                output_csvs=[p for p in (bid_csv, ask_csv) if p is not None],
+                success=True,
+            )
+
         bid_csv, ask_csv = export_range(
             symbol=task.symbol,
             start_utc=task.start_utc,

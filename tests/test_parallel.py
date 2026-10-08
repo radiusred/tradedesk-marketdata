@@ -142,3 +142,38 @@ def test_export_worker_forwards_timeouts_and_retries(monkeypatch, tmp_path):
 
     assert seen[0]["timeout"] == (15.0, 90.0) and seen[0]["retries"] == 5
     assert "timeout" not in seen[1] and "retries" not in seen[1]
+
+
+def test_histdata_task_runs_the_histdata_export(monkeypatch, tmp_path: Path) -> None:
+    import tradedesk_marketdata.histdata as hd
+
+    seen: dict = {}
+
+    def fake_histdata(**kwargs):
+        seen.update(kwargs)
+        return (None, None)
+
+    def no_dukascopy(**_):
+        raise AssertionError("the Dukascopy export must not run for a histdata task")
+
+    monkeypatch.setattr(hd, "export_range_histdata", fake_histdata)
+    monkeypatch.setattr(ex, "export_range", no_dukascopy)
+
+    task = ExportTask(
+        symbol="USA500IDXUSD",
+        start_utc=datetime(2015, 1, 1, tzinfo=UTC),
+        end_utc_inclusive=datetime(2015, 1, 31, tzinfo=UTC),
+        resample_rule=None,
+        price_divisor=1.0,
+        cache_dir=tmp_path,
+        out=tmp_path,
+        timeout=(5.0, 60.0),
+        retries=4,
+        source="histdata",
+    )
+    result = _export_worker(task)
+
+    assert result.success
+    assert seen["symbol"] == "USA500IDXUSD"
+    assert seen["timeout"] == (5.0, 60.0) and seen["retries"] == 4
+    assert "price_divisor" not in seen

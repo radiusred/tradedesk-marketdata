@@ -15,7 +15,13 @@ from .export import (
     DEFAULT_RETRIES,
     export_range,
 )
+from .histdata import HISTDATA_SYMBOLS, UnmappedSymbolError
+from .histdata import lookup as histdata_lookup
 from .metadata import ExportMetadata, now_iso_utc, write_sidecar
+
+SOURCES = ("dukascopy", "histdata")
+# Flags that only mean something for the Dukascopy datafeed.
+_DUKASCOPY_ONLY = ("--price-divisor", "--probe", "--probe-ticks")
 
 # Map CLI --log-level choices that are not valid stdlib `logging` level names
 # onto their stdlib equivalents.
@@ -62,6 +68,17 @@ def configure_logging(level: str = "INFO") -> None:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tradedesk-md-export")
     p.add_argument(
+        "--source",
+        choices=SOURCES,
+        default="dukascopy",
+        help="where to fetch ticks from (default: dukascopy). 'dukascopy' is Dukascopy's "
+        "hourly datafeed; 'histdata' is HistData.com's monthly tick files, which reach back "
+        "to 2000 for the FX majors and to 2010-11 for the indices, for the symbols in "
+        f"its symbol table ({', '.join(sorted(HISTDATA_SYMBOLS))}). Both write the same "
+        "cache files; a day already in the cache is never rewritten, whichever source "
+        "wrote it. --price-divisor, --probe and --probe-ticks are Dukascopy-only.",
+    )
+    p.add_argument(
         "--symbols",
         nargs="+",
         required=True,
@@ -88,20 +105,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--price-divisor",
         type=float,
-        default=1.0,
+        default=None,
         help="only used if Dukascopy tick prices are encoded as int32; "
-        "divisor applied during decode and recorded in metadata",
+        "divisor applied during decode and recorded in metadata (default: 1). "
+        "Dukascopy only: HistData prices are scaled per symbol",
     )
     p.add_argument(
         "--cache-dir",
         type=Path,
         default=Path(".cache/marketdata"),
-        help="Cache directory for .bi5 files (use --no-cache to disable)",
+        help="Cache directory for the raw downloads and the daily candle files "
+        "(use --no-cache to disable)",
     )
     p.add_argument(
         "--no-cache",
         action="store_true",
-        help="Disable caching .bi5 tick files and always re-download",
+        help="Disable caching raw downloads and daily candles and always re-download",
     )
     p.add_argument(
         "--workers",
@@ -117,7 +136,9 @@ def build_parser() -> argparse.ArgumentParser:
         "(404 / decode-failure) is committed from its available hours instead "
         "of being left for retry; the day is recorded in the per-symbol "
         "_partial_days.jsonl manifest. Use 0 to commit any permanent-gap day "
-        "immediately (orphan-cache backfill sweep). Default: 7",
+        "immediately (orphan-cache backfill sweep). With --source histdata, the "
+        "age past the end of a month after which HistData's file for it is "
+        "treated as final. Default: 7",
     )
     p.add_argument(
         "--connect-timeout",
@@ -137,7 +158,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--retries",
         type=int,
         default=DEFAULT_RETRIES,
-        help=f"Attempts per hour before it is skipped for this run (default: {DEFAULT_RETRIES})",
+        help="Attempts per hour (Dukascopy) or per month (HistData) before it is skipped "
+        f"for this run (default: {DEFAULT_RETRIES})",
     )
     p.add_argument(
         "--probe",
@@ -147,7 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--probe-ticks",
         type=int,
-        default=10,
+        default=None,
         help="Number of ticks to print when probing (default: 10)",
     )
     p.add_argument(
@@ -198,6 +220,27 @@ def main(argv: list[str] | None = None) -> int:
     if args.resample is not None and args.out is None:
         parser.error("--out is required when using --resample")
 
+    if args.source == "histdata":
+        given = [
+            flag
+            for flag, value in zip(
+                _DUKASCOPY_ONLY, (args.price_divisor, args.probe, args.probe_ticks), strict=True
+            )
+            if value not in (None, False)
+        ]
+        if given:
+            parser.error(
+                f"{', '.join(given)}: Dukascopy-only, not valid with --source histdata "
+                "(HistData prices are scaled into the cache's units by the symbol table)"
+            )
+        for symbol in args.symbols:
+            try:
+                histdata_lookup(symbol)
+            except UnmappedSymbolError as e:
+                parser.error(str(e))
+    price_divisor = 1.0 if args.price_divisor is None else args.price_divisor
+    probe_ticks = 10 if args.probe_ticks is None else args.probe_ticks
+
     start_utc = _parse_ymd(args.date_from)
     end_utc = _parse_ymd(args.date_to)
     if end_utc < start_utc:
@@ -231,10 +274,10 @@ def main(argv: list[str] | None = None) -> int:
                 start_utc=start_utc,
                 end_utc_inclusive=end_utc,
                 resample_rule=args.resample,
-                price_divisor=args.price_divisor,
+                price_divisor=price_divisor,
                 cache_dir=None if args.no_cache else args.cache_dir,
                 probe=True,
-                probe_ticks=args.probe_ticks,
+                probe_ticks=probe_ticks,
                 out=Path(tempfile.gettempdir()),
                 timeout=timeout,
                 retries=args.retries,
@@ -256,12 +299,13 @@ def main(argv: list[str] | None = None) -> int:
             start_utc=start_utc,
             end_utc_inclusive=end_utc,
             resample_rule=args.resample,
-            price_divisor=args.price_divisor,
+            price_divisor=price_divisor,
             cache_dir=cache_dir,
             out=out,
             commit_partial_after_days=args.commit_partial_after_days,
             timeout=timeout,
             retries=args.retries,
+            source=args.source,
         )
         for symbol in args.symbols
     ]
@@ -274,20 +318,28 @@ def main(argv: list[str] | None = None) -> int:
             if result.success:
                 for output_csv in result.output_csvs:
                     price_side = "bid" if output_csv.stem.endswith("_bid") else "ask"
+                    params: dict[str, object] = {
+                        "date_from": args.date_from,
+                        "date_to": args.date_to,
+                        "resample": args.resample,
+                        "price_side": price_side,
+                    }
+                    divisor = float(price_divisor)
+                    if args.source == "histdata":
+                        # HistData prices are multiplied into the cache's units; the
+                        # divisor-equivalent keeps "cache price = source price / divisor".
+                        scale = histdata_lookup(result.symbol).scale
+                        divisor = 1.0 / scale
+                        params["scale_factor"] = scale
                     meta = ExportMetadata(
                         schema_version="1",
-                        source="dukascopy",
+                        source=args.source,
                         symbol=result.symbol,
                         data_type="candles",
                         timestamp_format="iso8601_utc",
-                        price_divisor=float(args.price_divisor),
+                        price_divisor=divisor,
                         generated_at=now_iso_utc(),
-                        params={
-                            "date_from": args.date_from,
-                            "date_to": args.date_to,
-                            "resample": args.resample,
-                            "price_side": price_side,
-                        },
+                        params=params,
                     )
                     sidecar = write_sidecar(meta, output_csv)
                     # Only log in non-TTY mode

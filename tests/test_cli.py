@@ -250,3 +250,109 @@ def test_probe_returns_130_on_interrupt(monkeypatch) -> None:
         ]
     )
     assert rc == 130
+
+
+# ---------------------------------------------------------------------------
+# --source
+# ---------------------------------------------------------------------------
+
+
+def _capture_tasks(monkeypatch, *, csvs=()):
+    captured: list[par.ExportTask] = []
+
+    def fake_run_parallel_exports(tasks, max_workers):
+        captured.extend(tasks)
+        return [ExportResult(symbol=t.symbol, output_csvs=list(csvs), success=True) for t in tasks]
+
+    monkeypatch.setattr(par, "run_parallel_exports", fake_run_parallel_exports)
+    return captured
+
+
+_RANGE = ["--from", "2015-01-01", "--to", "2015-01-31"]
+
+
+def test_source_defaults_to_dukascopy(monkeypatch) -> None:
+    captured = _capture_tasks(monkeypatch)
+    assert cli.main(["--symbols", "EURUSD", *_RANGE, "--no-cache"]) == 0
+    assert [t.source for t in captured] == ["dukascopy"]
+    assert captured[0].price_divisor == 1.0
+
+
+def test_source_histdata_reaches_the_export_tasks(monkeypatch) -> None:
+    captured = _capture_tasks(monkeypatch)
+    rc = cli.main(
+        ["--source", "histdata", "--symbols", "USA500IDXUSD", "EURUSD", *_RANGE, "--no-cache"]
+    )
+    assert rc == 0
+    assert [t.source for t in captured] == ["histdata", "histdata"]
+
+
+def test_histdata_refuses_dukascopy_only_flags(monkeypatch, capsys) -> None:
+    import pytest
+
+    captured = _capture_tasks(monkeypatch)
+    base = ["--source", "histdata", "--symbols", "EURUSD", *_RANGE]
+    for extra in (["--price-divisor", "1"], ["--probe"], ["--probe-ticks", "5"]):
+        with pytest.raises(SystemExit) as exc:
+            cli.main(base + extra)
+        assert exc.value.code == 2
+        assert f"{extra[0]}: Dukascopy-only" in capsys.readouterr().err
+    assert captured == []
+
+
+def test_histdata_refuses_an_unmapped_symbol_before_any_export(monkeypatch, capsys) -> None:
+    import pytest
+
+    captured = _capture_tasks(monkeypatch)
+    with pytest.raises(SystemExit):
+        cli.main(["--source", "histdata", "--symbols", "EURUSD", "BTCUSD", *_RANGE])
+    assert "BTCUSD has no HistData mapping" in capsys.readouterr().err
+    assert captured == []
+
+
+def test_histdata_sidecar_reports_source_and_scale(monkeypatch, tmp_path: Path) -> None:
+    import json
+
+    bid_csv = tmp_path / "EURUSD_1H_bid.csv"
+    bid_csv.touch()
+    _capture_tasks(monkeypatch, csvs=[bid_csv])
+
+    rc = cli.main(
+        ["--source", "histdata", "--symbols", "EURUSD", *_RANGE]
+        + ["--resample", "1h", "--out", str(tmp_path), "--no-cache"]
+    )
+
+    assert rc == 0
+    meta = json.loads((tmp_path / "EURUSD_1H_bid.csv.meta.json").read_text())
+    assert meta["source"] == "histdata"
+    assert meta["price_divisor"] == 1e-4  # cache price = HistData price / 1e-4
+    assert meta["params"]["scale_factor"] == 1e4
+
+
+def test_dukascopy_sidecar_is_unchanged(monkeypatch, tmp_path: Path) -> None:
+    import json
+
+    bid_csv = tmp_path / "EURUSD_1H_bid.csv"
+    bid_csv.touch()
+    _capture_tasks(monkeypatch, csvs=[bid_csv])
+
+    rc = cli.main(
+        ["--symbols", "EURUSD", *_RANGE, "--price-divisor", "10"]
+        + ["--resample", "1h", "--out", str(tmp_path), "--no-cache"]
+    )
+
+    assert rc == 0
+    meta = json.loads((tmp_path / "EURUSD_1H_bid.csv.meta.json").read_text())
+    assert meta["source"] == "dukascopy"
+    assert meta["price_divisor"] == 10.0
+    assert set(meta["params"]) == {"date_from", "date_to", "resample", "price_side"}
+
+
+def test_help_documents_source(capsys) -> None:
+    import pytest
+
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["--help"])
+    out = capsys.readouterr().out
+    assert "--source {dukascopy,histdata}" in out
+    assert "USA500IDXUSD" in out
