@@ -46,7 +46,7 @@ from pathlib import Path
 import pandas as pd
 import requests  # type: ignore[import-untyped]
 import zstandard as zstd
-from rich.progress import Progress
+from rich.progress import Progress, TaskID
 
 from .cancel import cancellation, check_cancelled
 from .scale_sentry import check_scale_consistency
@@ -563,6 +563,120 @@ def _write_daily_candles(df: pd.DataFrame, path: Path) -> None:
     tmp.replace(path)
 
 
+# ---------------------------------------------------------------------------
+# Day assembly and commit, shared by every source
+# ---------------------------------------------------------------------------
+#
+# A source turns its raw units (Dukascopy hours, HistData months) into 1-minute
+# bid/ask candle frames per UTC day; from there on every source goes through the
+# same steps: assemble the day, run the scale sentry and write both day files
+# atomically.
+
+
+def _day_is_committed(cache_dir: Path, symbol: str, day: date) -> bool:
+    """True when both of a day's candle files exist.
+
+    A committed day is never rewritten by any source: cache precedence is
+    "first committed wins".
+    """
+    return (
+        _daily_candle_path(cache_dir, symbol, day, "bid").exists()
+        and _daily_candle_path(cache_dir, symbol, day, "ask").exists()
+    )
+
+
+def _assemble_day(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    """Concatenate a day's 1-min candle frames in time order (an empty day has no rows)."""
+    if not frames:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    return pd.concat(frames).sort_index()
+
+
+def _commit_day(
+    cache_dir: Path, symbol: str, day: date, bid_df: pd.DataFrame, ask_df: pd.DataFrame
+) -> str:
+    """Scale-check a day and write its bid and ask candle files.
+
+    Returns ``"committed"``, ``"scale_rejected"`` (the scale sentry refused the
+    day; nothing written) or ``"write_failed"``.
+
+    Scale-discontinuity sentry: refuse to write a daily candle CSV whose median
+    close diverges from the existing neighbour cache. That class of mismatch is
+    silent in backtests and produces order-of-magnitude wrong PnL across the
+    boundary.
+    """
+    if not bid_df.empty:
+        new_median = float(bid_df["close"].median())
+        ok, reason = check_scale_consistency(cache_dir, symbol, day, new_median)
+        if not ok:
+            log.error(reason)
+            return "scale_rejected"
+
+    for side, df in (("bid", bid_df), ("ask", ask_df)):
+        try:
+            _write_daily_candles(df, _daily_candle_path(cache_dir, symbol, day, side))
+        except Exception as e:
+            log.warning(f"{symbol}: failed to write daily {side} candle CSV for {day}: {e}")
+            return "write_failed"
+    return "committed"
+
+
+def _write_range_outputs(
+    symbol: str,
+    bid_frames: list[pd.DataFrame],
+    ask_frames: list[pd.DataFrame],
+    *,
+    out: Path,
+    resample_rule: str,
+    start_utc: datetime,
+    end_utc_inclusive: datetime,
+    progress: "Progress | None" = None,
+    write_task_id: TaskID | None = None,
+) -> tuple[Path | None, Path | None]:
+    """Aggregate the run's 1-min candles to ``resample_rule`` and write the range CSVs."""
+    if not bid_frames and not ask_frames:
+        raise RuntimeError(
+            f"No data produced for symbol={symbol} in range {start_utc}..{end_utc_inclusive}"
+        )
+
+    out.mkdir(parents=True, exist_ok=True)
+    rule_label = resample_rule.replace(" ", "").upper()
+    start_ts = pd.Timestamp(start_utc)
+    end_ts = pd.Timestamp(end_utc_inclusive + timedelta(days=1) - timedelta(microseconds=1))
+
+    out_csv_bid: Path | None = None
+    out_csv_ask: Path | None = None
+
+    for side, frames_list in (
+        ("bid", bid_frames),
+        ("ask", ask_frames),
+    ):
+        if not frames_list:
+            continue
+        all_1min = pd.concat(frames_list).sort_index()
+        all_1min = all_1min.loc[start_ts:end_ts]
+        # Aggregate 1-min candles to target resample rule (single pass over full range
+        # avoids boundary artefacts that occur when aggregating hour-by-hour)
+        frames = _candles_to_candles(all_1min, resample_rule)
+        # Deduplication is a safety net; should be a no-op after single-pass aggregation
+        frames = frames.loc[~frames.index.duplicated(keep="last")]
+        if frames.empty:
+            continue
+        out_csv = out / f"{symbol}_{rule_label}_{side}.csv"
+        out_reset = frames.reset_index().rename(columns={"index": "timestamp"})
+        out_reset["timestamp"] = out_reset["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S+00:00")
+        out_reset.to_csv(out_csv, index=False)
+        log.info(f"Wrote: {out_csv} ({len(frames)} candles)")
+        if side == "bid":
+            out_csv_bid = out_csv
+        else:
+            out_csv_ask = out_csv
+        if progress is not None and write_task_id is not None:
+            progress.update(write_task_id, advance=1)
+
+    return (out_csv_bid, out_csv_ask)
+
+
 def _partial_day_manifest_path(cache_dir: Path, symbol: str) -> Path:
     """Path to a symbol's append-only partial-day manifest."""
     return cache_dir / symbol / "_partial_days.jsonl"
@@ -900,9 +1014,8 @@ def export_range(
             _advance_cache_progress()
             return
 
-        _empty = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
-        bid_df = pd.concat(bid_frames).sort_index() if bid_frames else _empty
-        ask_df = pd.concat(ask_frames).sort_index() if ask_frames else _empty
+        bid_df = _assemble_day(bid_frames)
+        ask_df = _assemble_day(ask_frames)
 
         # A permanent-gap day with no decoded hours at all has nothing to
         # commit; leave it untouched (404 hours wrote no bi5 anyway).
@@ -910,30 +1023,17 @@ def export_range(
             _advance_cache_progress()
             return
 
-        # Scale-discontinuity sentry: refuse to write a daily candle
-        # CSV whose median close diverges from the existing neighbour cache.
-        # That class of mismatch is silent in backtests and produces order-of-
-        # magnitude wrong PnL across the boundary.  Leave the bi5 files in
-        # place so a subsequent retry with the correct --price-divisor can
-        # write the day cleanly. Scale-rejection dominates a permanent gap: such
-        # a day is recorded in day_scale_rejected and never partial-committed.
-        if not bid_df.empty:
-            new_median = float(bid_df["close"].median())
-            ok, reason = check_scale_consistency(cache_dir, symbol, day, new_median)
-            if not ok:
-                days_rejected_scale_sentry += 1
-                log.error(reason)
-                day_scale_rejected.add(day)
-                _advance_cache_progress()
-                return
-
-        for side, df in (("bid", bid_df), ("ask", ask_df)):
-            try:
-                _write_daily_candles(df, _daily_candle_path(cache_dir, symbol, day, side))
-            except Exception as e:
-                log.warning(f"{symbol}: failed to write daily {side} candle CSV for {day}: {e}")
-                _advance_cache_progress()
-                return
+        # A day the scale sentry refuses keeps its bi5 files so a subsequent
+        # retry with the correct --price-divisor can write the day cleanly.
+        # Scale-rejection dominates a permanent gap: such a day is recorded in
+        # day_scale_rejected and never partial-committed.
+        outcome = _commit_day(cache_dir, symbol, day, bid_df, ask_df)
+        if outcome == "scale_rejected":
+            days_rejected_scale_sentry += 1
+            day_scale_rejected.add(day)
+        if outcome != "committed":
+            _advance_cache_progress()
+            return
 
         # Delete .bi5 files for this day and remove the now-empty day directory
         day_dir: Path | None = None
@@ -1179,44 +1279,14 @@ def export_range(
     if resample_rule is None:
         return (None, None)
 
-    if not all_1min_bid_frames and not all_1min_ask_frames:
-        raise RuntimeError(
-            f"No data produced for symbol={symbol} in range {start_utc}..{end_utc_inclusive}"
-        )
-
-    out.mkdir(parents=True, exist_ok=True)
-    rule_label = resample_rule.replace(" ", "").upper()
-    start_ts = pd.Timestamp(start_utc)
-    end_ts = pd.Timestamp(end_utc_inclusive + timedelta(days=1) - timedelta(microseconds=1))
-
-    out_csv_bid: Path | None = None
-    out_csv_ask: Path | None = None
-
-    for side, frames_list in (
-        ("bid", all_1min_bid_frames),
-        ("ask", all_1min_ask_frames),
-    ):
-        if not frames_list:
-            continue
-        all_1min = pd.concat(frames_list).sort_index()
-        all_1min = all_1min.loc[start_ts:end_ts]
-        # Aggregate 1-min candles to target resample rule (single pass over full range
-        # avoids boundary artefacts that occur when aggregating hour-by-hour)
-        frames = _candles_to_candles(all_1min, resample_rule)
-        # Deduplication is a safety net; should be a no-op after single-pass aggregation
-        frames = frames.loc[~frames.index.duplicated(keep="last")]
-        if frames.empty:
-            continue
-        out_csv = out / f"{symbol}_{rule_label}_{side}.csv"
-        out_reset = frames.reset_index().rename(columns={"index": "timestamp"})
-        out_reset["timestamp"] = out_reset["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S+00:00")
-        out_reset.to_csv(out_csv, index=False)
-        log.info(f"Wrote: {out_csv} ({len(frames)} candles)")
-        if side == "bid":
-            out_csv_bid = out_csv
-        else:
-            out_csv_ask = out_csv
-        if progress is not None and write_task_id is not None:
-            progress.update(write_task_id, advance=1)
-
-    return (out_csv_bid, out_csv_ask)
+    return _write_range_outputs(
+        symbol,
+        all_1min_bid_frames,
+        all_1min_ask_frames,
+        out=out,
+        resample_rule=resample_rule,
+        start_utc=start_utc,
+        end_utc_inclusive=end_utc_inclusive,
+        progress=progress,
+        write_task_id=write_task_id,
+    )
