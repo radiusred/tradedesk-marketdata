@@ -569,8 +569,8 @@ def _write_daily_candles(df: pd.DataFrame, path: Path) -> None:
 #
 # A source turns its raw units (Dukascopy hours, HistData months) into 1-minute
 # bid/ask candle frames per UTC day; from there on every source goes through the
-# same steps: assemble the day, run the scale sentry and write both day files
-# atomically.
+# same steps: assemble the day, run the scale sentry, write both day files
+# atomically, and record which source produced the day.
 
 
 def _day_is_committed(cache_dir: Path, symbol: str, day: date) -> bool:
@@ -619,6 +619,40 @@ def _commit_day(
             log.warning(f"{symbol}: failed to write daily {side} candle CSV for {day}: {e}")
             return "write_failed"
     return "committed"
+
+
+def _source_manifest_path(cache_dir: Path, symbol: str) -> Path:
+    """Path to a symbol's append-only per-day provenance manifest."""
+    return cache_dir / symbol / "_sources.jsonl"
+
+
+def _append_source_manifest(
+    cache_dir: Path,
+    symbol: str,
+    day: date,
+    *,
+    source: str,
+    scale_factor: float,
+    source_unit: str,
+) -> None:
+    """Record which source produced a committed day.
+
+    ``scale_factor`` is the multiplier from the source's native price to the
+    cache's raw units (cache price = native price x scale_factor);
+    ``source_unit`` names the raw unit(s) the day was built from. One JSON
+    object per line, append-only, written once per commit.
+    """
+    manifest = _source_manifest_path(cache_dir, symbol)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "day": day.isoformat(),
+        "source": source,
+        "scale_factor": scale_factor,
+        "committed_at": datetime.now(UTC).isoformat(),
+        "source_unit": source_unit,
+    }
+    with open(manifest, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
 
 
 def _write_range_outputs(
@@ -766,6 +800,9 @@ def export_range(
         ``_partial_days.jsonl`` manifest. Days rejected by the scale-sentry are
         never partial-committed (a wrong-scale day must be re-run with the
         correct ``--price-divisor``, not committed).
+      - Every committed day is recorded in the per-symbol ``_sources.jsonl``
+        provenance manifest (source ``dukascopy``, the scale factor applied
+        and the day's hour set).
 
     commit_partial_after_days:
         Age threshold (in days, UTC) past which a permanent-gap day (404 /
@@ -1037,9 +1074,11 @@ def export_range(
 
         # Delete .bi5 files for this day and remove the now-empty day directory
         day_dir: Path | None = None
+        day_hours: list[int] = []
         for h in hours_to_fetch:
             if h.date() != day:
                 continue
+            day_hours.append(h.hour)
             bi5_path = (
                 cache_dir
                 / symbol
@@ -1061,6 +1100,20 @@ def export_range(
                 day_dir.rmdir()
             except OSError:
                 pass  # Not empty or already gone; that's fine
+
+        # Provenance: the day came from this run's hours of the Dukascopy datafeed.
+        # The divisor only applies to int32-encoded ticks; float ticks are stored as-is.
+        hours_label = f"{min(day_hours):02d}h-{max(day_hours):02d}h" if day_hours else "no hours"
+        _append_source_manifest(
+            cache_dir,
+            symbol,
+            day,
+            source="dukascopy",
+            scale_factor=1.0 / (price_divisor or 1.0) if detected_format == "int" else 1.0,
+            source_unit=(
+                f"{symbol}/{day.year}/{day.month - 1:02d}/{day.day:02d}/{hours_label}_ticks.bi5"
+            ),
+        )
 
         # Record the partial commit so downstream data-quality checks can tell a
         # known-permanent gap from a complete day.
