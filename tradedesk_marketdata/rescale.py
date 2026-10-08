@@ -1,6 +1,6 @@
 """Rescale daily candle cache files that drifted off a symbol's dominant scale.
 
-Sibling to :mod:`tradedesk_dukascopy.normalize`, but with a different target:
+Sibling to :mod:`tradedesk_marketdata.normalize`, but with a different target:
 ``normalize`` brings each day's prices into a hardcoded *natural-units* band
 (``USDJPY`` → 50–500); ``rescale`` brings each day's prices into the symbol's
 **existing dominant cache scale** by power-of-ten multiplication.  This is the

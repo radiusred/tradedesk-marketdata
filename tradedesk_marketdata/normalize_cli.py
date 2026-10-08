@@ -2,7 +2,7 @@
 
 Usage::
 
-    tradedesk-dc-normalize --cache-dir ./cache [--symbols EURUSD AUDNZD] [--dry-run]
+    tradedesk-md-normalize --cache-dir ./cache [--symbols EURUSD AUDNZD] [--dry-run]
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from .normalize import normalize_cache
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="tradedesk-dc-normalize",
+        prog="tradedesk-md-normalize",
         description=(
             "Detect and correct price-scale errors in a Dukascopy candle cache.\n\n"
             "Use --dry-run first to preview what would be changed."

@@ -2,7 +2,7 @@ import struct
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import tradedesk_dukascopy.export as ex
+import tradedesk_marketdata.export as ex
 
 
 def test_symbol_normalise_strips_separators_and_uppercases() -> None:

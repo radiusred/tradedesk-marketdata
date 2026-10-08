@@ -1,4 +1,4 @@
-import tradedesk_dukascopy.export as ex
+import tradedesk_marketdata.export as ex
 
 
 def test_probe_price_format_raises_on_too_short_payload() -> None:

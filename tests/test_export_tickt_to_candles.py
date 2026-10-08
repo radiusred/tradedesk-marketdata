@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pandas as pd
 import pytest
 
-import tradedesk_dukascopy.export as ex
+import tradedesk_marketdata.export as ex
 
 
 def _make_1min_df(rows: list[tuple]) -> pd.DataFrame:

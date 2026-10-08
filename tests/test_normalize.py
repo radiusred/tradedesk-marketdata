@@ -1,4 +1,4 @@
-"""Tests for tradedesk_dukascopy.normalize."""
+"""Tests for tradedesk_marketdata.normalize."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from tradedesk_dukascopy.normalize import (
+from tradedesk_marketdata.normalize import (
     _expected_price_range,
     _read_zst,
     _write_zst,

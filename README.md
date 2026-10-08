@@ -1,18 +1,23 @@
 
 ![banner](https://i.ibb.co/Kc5C88gp/tradedesk-banner.webp)
 
-# tradedesk-dukascopy
+# tradedesk-marketdata
 
-![CI Build](https://github.com/radiusred/tradedesk-dukascopy/actions/workflows/ci.yml/badge.svg)
-[![PyPI Version](https://img.shields.io/pypi/v/tradedesk-dukascopy?label=PyPI)](https://pypi.python.org/pypi/tradedesk-dukascopy)
+![CI Build](https://github.com/radiusred/tradedesk-marketdata/actions/workflows/ci.yml/badge.svg)
+[![PyPI Version](https://img.shields.io/pypi/v/tradedesk-marketdata?label=PyPI)](https://pypi.python.org/pypi/tradedesk-marketdata)
 
-**Dukascopy tick downloader and candle exporter for use in backtesting your trading strategies.**
+**Market data downloader and candle exporter for use in backtesting your trading strategies.**
 
-This tool downloads raw tick data from Dukascopy, converts it into clean,
-deterministic CSV candle files, and writes a metadata sidecar describing exactly
-how the data was produced.
+This tool downloads raw tick data, converts it into clean, deterministic CSV
+candle files, and writes a metadata sidecar describing exactly how the data was
+produced. Dukascopy's public datafeed is the first source; the cache layout and
+candle conventions are source-agnostic so that others can be added.
 
 It is designed to be run once per dataset, not repeatedly during backtests.
+
+> **Renamed from `tradedesk-dukascopy` in 2.0.** The package is now
+> `tradedesk_marketdata` and the commands are `tradedesk-md-*`; the old
+> `tradedesk-dc-*` command names still work as aliases for this major version.
 
 ![loop](https://i.ibb.co/BSz1JSH/tradedesk-dukascopy.gif)
 
@@ -23,13 +28,13 @@ It is designed to be run once per dataset, not repeatedly during backtests.
 Install:
 
 ```bash
-pip install tradedesk-dukascopy
+pip install tradedesk-marketdata
 ```
 
 Export 5-minute candles for EURUSD:
 
 ```bash
-tradedesk-dc-export --symbols EURUSD \
+tradedesk-md-export --symbols EURUSD \
   --from 2025-01-01 --to 2025-01-31 \
   --resample 5min \
   --out data \
@@ -71,7 +76,7 @@ Examples:
 If unsure, use probe mode:
 
 ```bash
-tradedesk-dc-export --symbols GBPSEK \
+tradedesk-md-export --symbols GBPSEK \
   --from 2025-07-01 --to 2025-07-01 \
   --probe
 ```
@@ -108,11 +113,11 @@ If you already populated `--cache-dir` with the wrong price scale, the package
 ships a repair command:
 
 ```bash
-tradedesk-dc-normalize --cache-dir ./cache --dry-run
-tradedesk-dc-normalize --cache-dir ./cache --symbols EURUSD USDJPY
+tradedesk-md-normalize --cache-dir ./cache --dry-run
+tradedesk-md-normalize --cache-dir ./cache --symbols EURUSD USDJPY
 ```
 
-`tradedesk-dc-normalize` rewrites cached daily candle files in place when it
+`tradedesk-md-normalize` rewrites cached daily candle files in place when it
 detects prices that are clearly outside the expected real-price range for a
 symbol. It picks the power-of-ten factor in `[1e-5, 1e5]` whose result sits
 closest to the geometric midpoint of the band, so it corrects both
@@ -128,19 +133,19 @@ cache.
 
 ### Rescaling a cache that drifted off its own dominant scale
 
-`tradedesk-dc-normalize` brings each day's prices into a hardcoded
+`tradedesk-md-normalize` brings each day's prices into a hardcoded
 *natural-units* band (e.g. USDJPY 50–500). That is the wrong target when the
 downstream consumer expects prices at the symbol's existing scaled-cache
 convention (for instance the bulk of an FX/JPY cache exported with
 `--price-divisor 10`, leaving USDJPY at ~15 700 rather than ~157.0).
 
-Use `tradedesk-dc-rescale` for that case. It finds the symbol's dominant
+Use `tradedesk-md-rescale` for that case. It finds the symbol's dominant
 cache scale (median of per-day medians) and snaps every off-scale day back
 onto it by a power-of-ten factor:
 
 ```bash
-tradedesk-dc-rescale --cache-dir ./cache --dry-run
-tradedesk-dc-rescale --cache-dir ./cache --symbols USDJPY
+tradedesk-md-rescale --cache-dir ./cache --dry-run
+tradedesk-md-rescale --cache-dir ./cache --symbols USDJPY
 ```
 
 Days whose median cannot be reconciled to a power of ten of the dominant
@@ -149,12 +154,12 @@ matching `--price-divisor`.
 
 ### Write-time scale-discontinuity sentry
 
-`tradedesk-dc-export` automatically refuses to commit a freshly-resampled
+`tradedesk-md-export` automatically refuses to commit a freshly-resampled
 daily CSV whose median close diverges by more than 3× from the medians of
 its neighbours already on disk. The bi5 hour files for that day are kept so
 the day can be retried with the matching `--price-divisor`. See
-`tradedesk_dukascopy.scale_sentry` for the failure mode this catches —
-typically a cache stitched together from multiple `tradedesk-dc-export`
+`tradedesk_marketdata.scale_sentry` for the failure mode this catches —
+typically a cache stitched together from multiple `tradedesk-md-export`
 runs that used different `--price-divisor` values.
 
 ## Data-quality audit scripts
@@ -237,7 +242,7 @@ When run, the tool will fetch new or missing raw data files from Dukascopy for t
 
 `--cache-dir` defaults to `.cache/marketdata` (relative to the current working directory). Pass `--no-cache` to disable caching entirely and always re-download.
 
-Dukascopy downloads are notoriously slow and unreliable due to rate limiting and limited resources available for their service. This tool has multiple strategies to address and work around those limitations, including retaining the raw files until a full daily file of CSV data can be written. Re-running the same `tradedesk-dc-export` is both safe and efficient - it will only attempt to fill in gaps and will finish very quickly where downloads or conversions are already cached.
+Dukascopy downloads are notoriously slow and unreliable due to rate limiting and limited resources available for their service. This tool has multiple strategies to address and work around those limitations, including retaining the raw files until a full daily file of CSV data can be written. Re-running the same `tradedesk-md-export` is both safe and efficient - it will only attempt to fill in gaps and will finish very quickly where downloads or conversions are already cached.
 
 Re-export also self-heals stranded raw-tick day-dirs before its all-cached
 early-exit check, in three cases:
@@ -291,7 +296,7 @@ quick. Rate limiting (HTTP 429) is per client address: more concurrency makes
 it worse, longer timeouts do not.
 
 ```bash
-tradedesk-dc-export --symbols USA500IDXUSD \
+tradedesk-md-export --symbols USA500IDXUSD \
   --from 2010-01-01 --to 2019-12-31 \
   --cache-dir /opt/tradedesk/marketdata --price-divisor 1 \
   --workers 1 --connect-timeout 15 --read-timeout 90 --retries 5
@@ -311,7 +316,7 @@ Younger gap days still get the original "leave the bi5 in place and retry
 next run" treatment.
 
 ```bash
-tradedesk-dc-export --symbols LIGHTCMDUSD \
+tradedesk-md-export --symbols LIGHTCMDUSD \
   --from 2022-01-01 --to 2022-12-31 \
   --out data --cache-dir ./cache \
   --price-divisor 1000 --workers 1 \
@@ -337,7 +342,7 @@ the standard library's `CRITICAL` and `DEBUG` levels, so `trace` behaves
 identically to `debug` rather than erroring out.
 
 ```bash
-tradedesk-dc-export --symbols EURUSD \
+tradedesk-md-export --symbols EURUSD \
   --from 2025-01-01 --to 2025-01-31 \
   --out data --cache-dir ./cache --workers 1 \
   --log-level debug
@@ -423,4 +428,4 @@ Copyright 2026 [Radius Red Ltd.](https://www.radiusred.uk)
 
 ## Contributing
 
-See CONTRIBUTING.md for guidelines on contributing to tradedesk-dukascopy.
+See CONTRIBUTING.md for guidelines on contributing to tradedesk-marketdata.

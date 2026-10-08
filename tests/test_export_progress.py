@@ -28,7 +28,7 @@ class FakeProgress:
 
 
 def test_export_range_reports_download_and_resample_progress(tmp_path, monkeypatch):
-    from tradedesk_dukascopy import export as ex
+    from tradedesk_marketdata import export as ex
 
     start = datetime(2025, 1, 1, 0, 0, tzinfo=UTC)
     hours = [start + timedelta(hours=i) for i in range(3)]

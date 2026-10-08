@@ -13,7 +13,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from tradedesk_dukascopy.normalize import _write_zst
+from tradedesk_marketdata.normalize import _write_zst
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "audit_fx_scale.py"

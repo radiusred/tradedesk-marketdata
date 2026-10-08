@@ -1,6 +1,6 @@
 """Write-time scale-discontinuity sentry for the Dukascopy daily candle cache.
 
-A Dukascopy `tradedesk-dc-export` run applies a single ``--price-divisor`` to
+A Dukascopy `tradedesk-md-export` run applies a single ``--price-divisor`` to
 every tick it decodes.  If the operator re-runs the exporter for a later date
 range with a *different* divisor, the resulting daily CSVs in
 ``cache_dir / SYMBOL / YYYY / MM / DD_{bid,ask}.csv.zst`` end up at a different

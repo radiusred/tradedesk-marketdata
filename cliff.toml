@@ -53,4 +53,4 @@ sort_commits = "newest"
 
 [remote.github]
 owner = "radiusred"
-repo = "tradedesk-dukascopy"
+repo = "tradedesk-marketdata"

@@ -2,7 +2,7 @@
 
 Usage::
 
-    tradedesk-dc-rescale --cache-dir ./cache --symbols USDJPY [--dry-run]
+    tradedesk-md-rescale --cache-dir ./cache --symbols USDJPY [--dry-run]
 
 Brings every per-day median onto the symbol's dominant scale by a power-of-ten
 factor.  Days that cannot be reconciled to a power of ten are logged as
@@ -22,7 +22,7 @@ from .rescale import rescale_cache
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="tradedesk-dc-rescale",
+        prog="tradedesk-md-rescale",
         description=(
             "Rescale daily candle cache files onto the symbol's dominant scale. "
             "Use --dry-run to preview."

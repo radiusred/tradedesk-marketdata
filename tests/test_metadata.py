@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from tradedesk_dukascopy.metadata import ExportMetadata, now_iso_utc, write_sidecar
+from tradedesk_marketdata.metadata import ExportMetadata, now_iso_utc, write_sidecar
 
 
 def test_now_iso_utc_ends_with_z_and_is_isoish() -> None:

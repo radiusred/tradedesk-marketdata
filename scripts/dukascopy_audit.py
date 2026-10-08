@@ -27,7 +27,7 @@ import zstandard as zstd
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _sys.path.insert(0, str(_REPO_ROOT))
-from tradedesk_dukascopy.normalize import _expected_price_range, infer_price_divisor  # noqa: E402
+from tradedesk_marketdata.normalize import _expected_price_range, infer_price_divisor  # noqa: E402
 
 
 def load_day(path: Path) -> pd.DataFrame:

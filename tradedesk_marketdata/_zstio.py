@@ -1,6 +1,6 @@
 """Shared Zstandard-compressed daily-candle CSV I/O helpers.
 
-Both :mod:`tradedesk_dukascopy.normalize` and :mod:`tradedesk_dukascopy.rescale`
+Both :mod:`tradedesk_marketdata.normalize` and :mod:`tradedesk_marketdata.rescale`
 read and rewrite the same ``{DD}_{bid,ask}.csv.zst`` daily candle files, so the
 read/write round-trip lives here to keep a single implementation.
 """

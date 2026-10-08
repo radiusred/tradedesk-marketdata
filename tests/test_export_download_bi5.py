@@ -4,7 +4,7 @@ from unittest.mock import Mock
 import pytest
 import requests
 
-import tradedesk_dukascopy.export as ex
+import tradedesk_marketdata.export as ex
 
 
 class DummyResponse:

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import requests
 
-import tradedesk_dukascopy.export as ex
+import tradedesk_marketdata.export as ex
 
 
 class BackoffResponse:

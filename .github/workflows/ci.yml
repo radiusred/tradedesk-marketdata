@@ -32,7 +32,7 @@ jobs:
       - name: Run tests with coverage
         run: |
           uv run pytest \
-            --cov=tradedesk_dukascopy \
+            --cov=tradedesk_marketdata \
             --cov-report=term-missing \
             --cov-report=xml \
             --cov-fail-under=75

@@ -2,9 +2,9 @@ import logging
 from datetime import UTC
 from pathlib import Path
 
-import tradedesk_dukascopy.cli as cli
-import tradedesk_dukascopy.parallel as par
-from tradedesk_dukascopy.parallel import ExportResult
+import tradedesk_marketdata.cli as cli
+import tradedesk_marketdata.parallel as par
+from tradedesk_marketdata.parallel import ExportResult
 
 
 def test_configure_logging_maps_fatal_to_critical() -> None:
@@ -98,7 +98,7 @@ def test_main_does_not_write_sidecar_when_no_output_csvs(monkeypatch, tmp_path: 
 
 
 def test_parser_network_defaults_match_export_module() -> None:
-    import tradedesk_dukascopy.export as ex
+    import tradedesk_marketdata.export as ex
 
     args = cli.build_parser().parse_args(
         ["--symbols", "EURUSD", "--from", "2025-07-01", "--to", "2025-07-01"]

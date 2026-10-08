@@ -5,9 +5,9 @@ Tests for parallel.py — _export_worker and run_parallel_exports.
 from datetime import UTC, datetime
 from pathlib import Path
 
-import tradedesk_dukascopy.export as ex
-import tradedesk_dukascopy.parallel as par
-from tradedesk_dukascopy.parallel import ExportResult, ExportTask, _export_worker
+import tradedesk_marketdata.export as ex
+import tradedesk_marketdata.parallel as par
+from tradedesk_marketdata.parallel import ExportResult, ExportTask, _export_worker
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -117,8 +117,8 @@ def test_export_worker_forwards_timeouts_and_retries(monkeypatch, tmp_path):
     leaves export_range's own defaults in force."""
     from datetime import UTC, datetime
 
-    import tradedesk_dukascopy.export as ex
-    import tradedesk_dukascopy.parallel as par
+    import tradedesk_marketdata.export as ex
+    import tradedesk_marketdata.parallel as par
 
     seen: list[dict] = []
 

@@ -19,12 +19,12 @@ timestamp,open,high,low,close,volume
 - Month in URL is zero-based. See Dukascopy datafeed conventions.
 
 Examples:
-  tradedesk-dc-export --symbols EURUSD \
+  tradedesk-md-export --symbols EURUSD \
     --from 2025-08-01 --to 2025-12-31 \
     --resample 5min \
     --out out
 
-  tradedesk-dc-export --symbols USA500IDXUSD \
+  tradedesk-md-export --symbols USA500IDXUSD \
     --from 2025-11-01 --to 2025-12-31 \
     --resample 5min \
     --out out
@@ -52,7 +52,7 @@ from .cancel import cancellation, check_cancelled
 from .scale_sentry import check_scale_consistency
 
 BASE_URL = "https://datafeed.dukascopy.com/datafeed"
-UA = "tradedesk/1.0 bi5-export (https://github.com/radiusred/tradedesk-dukascopy)"
+UA = "tradedesk/1.0 bi5-export (https://github.com/radiusred/tradedesk-marketdata)"
 # Retry configuration
 RETRY_BASE_DELAY = 0.8  # seconds
 RETRY_MAX_DELAY = 6.0  # seconds
@@ -461,7 +461,7 @@ def _cleanup_stale_day_dirs(
     download/decode, so the leftover ``.bi5`` are never cleaned, and the
     consumer's ``_check_old_format`` guard hard-fails any backtest touching the
     day. Re-running the export now repairs it (matching the documented
-    "re-run tradedesk-dc-export" remediation). The raw ``.bi5`` are losslessly
+    "re-run tradedesk-md-export" remediation). The raw ``.bi5`` are losslessly
     reproducible, so removing them once candles exist is safe.
 
     The third case covers weekend / market-holiday days where every
@@ -1050,13 +1050,13 @@ def export_range(
                     # point-factor (e.g. 10 000 for 4-decimal pairs).  If you
                     # pass --price-divisor 1.0 (the default) the cached candles
                     # will store raw integer values instead of real prices.
-                    # Use tradedesk-dc-normalize to fix an affected cache.
+                    # Use tradedesk-md-normalize to fix an affected cache.
                     log.warning(
                         "%s: int32 tick format detected with --price-divisor 1.0 (default). "
                         "Decoded prices will be raw integer values, not actual market prices. "
                         "Pass the correct --price-divisor for this instrument "
                         "(e.g. 10000 for 4-decimal FX, 100 for JPY crosses) "
-                        "or run 'tradedesk-dc-normalize' on an existing cache.",
+                        "or run 'tradedesk-md-normalize' on an existing cache.",
                         symbol,
                     )
 

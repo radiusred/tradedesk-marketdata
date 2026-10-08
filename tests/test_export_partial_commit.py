@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-import tradedesk_dukascopy.export as ex
+import tradedesk_marketdata.export as ex
 
 # ---------------------------------------------------------------------------
 # Helpers

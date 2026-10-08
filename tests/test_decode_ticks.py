@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-import tradedesk_dukascopy.export as ex
+import tradedesk_marketdata.export as ex
 
 
 def _bi5_float_records(*rows: tuple[int, float, float, float, float]) -> bytes:

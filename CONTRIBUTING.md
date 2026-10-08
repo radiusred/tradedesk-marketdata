@@ -1,6 +1,6 @@
-# Contributing to tradedesk-dukascopy
+# Contributing to tradedesk-marketdata
 
-We welcome contributions to `tradedesk-dukascopy`. This guide covers the
+We welcome contributions to `tradedesk-marketdata`. This guide covers the
 standards and workflow you need to contribute successfully.
 
 ## Scope
@@ -80,7 +80,7 @@ All contributions must pass with zero type errors.
 We use [pytest](https://docs.pytest.org/):
 
 ```bash
-pytest --cov=tradedesk_dukascopy --cov-fail-under=75
+pytest --cov=tradedesk_marketdata --cov-fail-under=75
 ```
 
 - All new and existing tests must pass following any code change.

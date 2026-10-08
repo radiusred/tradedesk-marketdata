@@ -1,4 +1,4 @@
-"""Tests for tradedesk_dukascopy.scale_sentry."""
+"""Tests for tradedesk_marketdata.scale_sentry."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 import zstandard as zstd
 
-from tradedesk_dukascopy.scale_sentry import (
+from tradedesk_marketdata.scale_sentry import (
     check_scale_consistency,
     collect_history_medians,
 )

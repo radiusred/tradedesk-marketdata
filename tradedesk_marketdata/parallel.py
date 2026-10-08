@@ -50,7 +50,7 @@ class ExportResult:
 
 def _export_worker(task: ExportTask, progress: Progress | None = None) -> ExportResult:
     """Worker function to export a single symbol."""
-    from tradedesk_dukascopy.export import export_range
+    from tradedesk_marketdata.export import export_range
 
     # None means "the export module's default", so a task built without the
     # network settings behaves exactly as before.

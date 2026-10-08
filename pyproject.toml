@@ -3,9 +3,9 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "tradedesk-dukascopy"
+name = "tradedesk-marketdata"
 dynamic = ["version"]
-description = "Dukascopy tick downloader and candle/tick exporter for backtesting workflows."
+description = "Market data downloader and candle/tick exporter for backtesting workflows (Dukascopy today; more sources to come)."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -16,7 +16,7 @@ authors = [
 maintainers = [
   { name = "Radius Red Ltd.", email = "opensource@radiusred.uk" }
 ]
-keywords = ["dukascopy", "ticks", "candles", "backtesting", "trading"]
+keywords = ["market-data", "dukascopy", "ticks", "candles", "backtesting", "trading"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
@@ -42,26 +42,30 @@ parquet = ["pyarrow>=16.1"]
 tooling = ["llm-tldr[dev]>=1.5.2"]
 
 [project.scripts]
-tradedesk-dc-export = "tradedesk_dukascopy.cli:main"
-tradedesk-dc-normalize = "tradedesk_dukascopy.normalize_cli:main"
-tradedesk-dc-rescale = "tradedesk_dukascopy.rescale_cli:main"
+tradedesk-md-export = "tradedesk_marketdata.cli:main"
+tradedesk-md-normalize = "tradedesk_marketdata.normalize_cli:main"
+tradedesk-md-rescale = "tradedesk_marketdata.rescale_cli:main"
+# The pre-2.0 command names, kept as aliases for one major version.
+tradedesk-dc-export = "tradedesk_marketdata.cli:main"
+tradedesk-dc-normalize = "tradedesk_marketdata.normalize_cli:main"
+tradedesk-dc-rescale = "tradedesk_marketdata.rescale_cli:main"
 
 [project.urls]
 Homepage = "https://github.com/radiusred"
-Repository = "https://github.com/radiusred/tradedesk-dukascopy"
-Issues = "https://github.com/radiusred/tradedesk-dukascopy/issues"
+Repository = "https://github.com/radiusred/tradedesk-marketdata"
+Issues = "https://github.com/radiusred/tradedesk-marketdata/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["tradedesk_dukascopy"]
+packages = ["tradedesk_marketdata"]
 
 [tool.hatch.version]
-path = "tradedesk_dukascopy/__init__.py"
+path = "tradedesk_marketdata/__init__.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
 [tool.coverage.run]
-source = ["tradedesk_dukascopy"]
+source = ["tradedesk_marketdata"]
 omit = ["*/tests/*"]
 
 [tool.coverage.report]

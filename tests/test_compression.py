@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 import zstandard as zstd
 
-import tradedesk_dukascopy.export as ex
+import tradedesk_marketdata.export as ex
 
 # ---------------------------------------------------------------------------
 # Helpers

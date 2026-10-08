@@ -1,4 +1,4 @@
-"""Tests for tradedesk_dukascopy.rescale."""
+"""Tests for tradedesk_marketdata.rescale."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 import zstandard as zstd
 
-from tradedesk_dukascopy.rescale import _pick_factor, rescale_cache, rescale_symbol
+from tradedesk_marketdata.rescale import _pick_factor, rescale_cache, rescale_symbol
 
 
 def _write_day(cache_dir: Path, symbol: str, day: date, median: float, side: str = "bid") -> Path:

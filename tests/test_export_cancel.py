@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 import requests
 
-import tradedesk_dukascopy.export as ex
-from tradedesk_dukascopy.cancel import cancellation
+import tradedesk_marketdata.export as ex
+from tradedesk_marketdata.cancel import cancellation
 
 
 @pytest.fixture(autouse=True)

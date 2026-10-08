@@ -7,7 +7,7 @@ multiplying every OHLC value by the inverse power of ten.
 
 Background
 ----------
-When ``tradedesk-dc-export`` is run with the wrong ``--price-divisor`` for a
+When ``tradedesk-md-export`` is run with the wrong ``--price-divisor`` for a
 symbol the daily candle CSVs store prices that are off by a power of ten.
 The correct divisor varies by instrument type:
 

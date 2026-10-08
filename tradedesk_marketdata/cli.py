@@ -60,7 +60,7 @@ def configure_logging(level: str = "INFO") -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="tradedesk-dc-export")
+    p = argparse.ArgumentParser(prog="tradedesk-md-export")
     p.add_argument(
         "--symbols",
         nargs="+",
@@ -245,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # Build export tasks
-    from tradedesk_dukascopy.parallel import ExportTask, run_parallel_exports
+    from tradedesk_marketdata.parallel import ExportTask, run_parallel_exports
 
     out = Path(args.out) if args.out is not None else Path(tempfile.gettempdir())
     cache_dir = None if args.no_cache else args.cache_dir
