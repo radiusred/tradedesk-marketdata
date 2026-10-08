@@ -42,16 +42,20 @@ def _bi5_path(cache_dir: Path, symbol: str, hour: datetime) -> Path:
     )
 
 
-def _patch(monkeypatch, *, gap_hours=(), decode_fail_hours=(), empty_hours=()):
+def _patch(
+    monkeypatch, *, gap_hours=(), decode_fail_hours=(), empty_hours=(), unavailable_hours=()
+):
     """Patch download/probe/decode so export_range runs offline.
 
     - gap_hours: hours whose download returns None (404).
+    - unavailable_hours: hours whose download returns Unavailable (retries exhausted).
     - empty_hours: hours whose download returns b"" (legitimate empty-200).
     - decode_fail_hours: hours that download OK but raise on decode.
     A sentinel .bi5 is written for every downloaded (non-404) hour so _flush_day
     has something to delete.
     """
     gap = {h.hour for h in gap_hours}
+    unavailable = {h.hour for h in unavailable_hours}
     empty = {h.hour for h in empty_hours}
     dfail = {h.hour for h in decode_fail_hours}
 
@@ -59,6 +63,8 @@ def _patch(monkeypatch, *, gap_hours=(), decode_fail_hours=(), empty_hours=()):
         hh = int(url.split("/")[-1][:2])  # "00h_ticks.bi5" -> 0
         if hh in gap:
             return None
+        if hh in unavailable:
+            return ex.Unavailable("synthetic timeout")
         if cache_path is not None:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_bytes(b"fake")
@@ -351,3 +357,59 @@ def test_manifest_helper_appends_one_line_per_record(tmp_path):
     assert [r["day"] for r in records] == [d1.isoformat(), d2.isoformat()]
     assert records[0]["missing_hours"] == [2, 5, 6]
     assert records[1]["gap_reason"] == "decode_failed+missing_404"
+
+
+# ---------------------------------------------------------------------------
+# Unavailable hours (retries exhausted) are not gaps: the day waits for a re-run
+# ---------------------------------------------------------------------------
+
+
+def test_aged_day_with_unavailable_hour_is_left_for_retry(monkeypatch, tmp_path):
+    """A timeout is not a 404: however old the day, nothing is committed and no
+    manifest line is written, so the next run can still fetch the hour."""
+    start = _aged_start(30)
+    hours = [start + timedelta(hours=i) for i in range(24)]
+    cache = tmp_path / "cache"
+    _patch(monkeypatch, unavailable_hours=[hours[3]])
+
+    _run(monkeypatch, symbol="EURUSD", start=start, hours=hours, out=tmp_path, cache_dir=cache)
+
+    day = start.date()
+    assert not ex._daily_candle_path(cache, "EURUSD", day, "bid").exists()
+    assert not ex._daily_candle_path(cache, "EURUSD", day, "ask").exists()
+    assert _read_manifest(cache, "EURUSD") == []
+    # The hours that did download keep their bi5 for the retry.
+    assert _bi5_path(cache, "EURUSD", hours[0]).exists()
+
+
+def test_unavailable_hour_blocks_partial_commit_of_a_gap_day(monkeypatch, tmp_path):
+    """A day with both a real 404 and an unavailable hour is not partial-committed:
+    until every hour has a definitive answer the gap set is unknown."""
+    start = _aged_start(30)
+    hours = [start + timedelta(hours=i) for i in range(24)]
+    cache = tmp_path / "cache"
+    _patch(monkeypatch, gap_hours=[hours[5]], unavailable_hours=[hours[6]])
+
+    _run(monkeypatch, symbol="EURUSD", start=start, hours=hours, out=tmp_path, cache_dir=cache)
+
+    day = start.date()
+    assert not ex._daily_candle_path(cache, "EURUSD", day, "bid").exists()
+    assert _read_manifest(cache, "EURUSD") == []
+
+
+def test_unavailable_day_commits_normally_once_the_hour_arrives(monkeypatch, tmp_path):
+    start = _aged_start(30)
+    hours = [start + timedelta(hours=i) for i in range(24)]
+    cache = tmp_path / "cache"
+    day = start.date()
+
+    _patch(monkeypatch, unavailable_hours=[hours[3]])
+    _run(monkeypatch, symbol="EURUSD", start=start, hours=hours, out=tmp_path, cache_dir=cache)
+    assert not ex._daily_candle_path(cache, "EURUSD", day, "bid").exists()
+
+    _patch(monkeypatch)  # the re-run fetches every hour
+    _run(monkeypatch, symbol="EURUSD", start=start, hours=hours, out=tmp_path, cache_dir=cache)
+    assert ex._daily_candle_path(cache, "EURUSD", day, "bid").exists()
+    assert ex._daily_candle_path(cache, "EURUSD", day, "ask").exists()
+    assert _read_manifest(cache, "EURUSD") == []  # a clean day, not a partial one
+    assert not _bi5_path(cache, "EURUSD", hours[0]).exists()  # bi5 cleaned up on commit

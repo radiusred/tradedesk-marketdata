@@ -130,16 +130,31 @@ def _dukascopy_tick_url(symbol: str, hour_start: datetime) -> str:
     return f"{BASE_URL}/{symbol}/{y}/{m0:02d}/{d:02d}/{h:02d}h_ticks.bi5"
 
 
+@dataclass(frozen=True)
+class Unavailable:
+    """An hour that could not be fetched in this run.
+
+    Returned by ``_download_bi5`` when every attempt ended in a timeout, a
+    connection error or a non-404 HTTP status (429, 5xx). It is not a 404: the
+    datafeed may well hold the hour, so its day is left uncommitted and the
+    next run retries it. Conflating the two was how a rate-limited run came to
+    partial-commit days with 21 of 24 hours recorded as permanent gaps.
+    """
+
+    error: str
+
+
 def _download_bi5(
     url: str,
     cache_path: Path | None,
     timeout: tuple[float, float] = (DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT),
     retries: int = DEFAULT_RETRIES,
-) -> bytes | None:
+) -> bytes | None | Unavailable:
     """
     Returns compressed bytes.
 
-    - None means "no file" (HTTP 404) or unrecoverable failure.
+    - None means "no file" (HTTP 404).
+    - Unavailable means every attempt failed for another reason; retry next run.
     - b"" means "valid but empty" (HTTP 200 with zero-length body): no tick data for that hour.
 
     We cache empty payloads as empty files so repeated exports do not re-download them.
@@ -200,8 +215,8 @@ def _download_bi5(
                     raise KeyboardInterrupt() from None
                 delay = min(delay * RETRY_BACKOFF_FACTOR, RETRY_MAX_DELAY)
 
-    log.warning("skipping %s after %d failed attempts (%s)", url, retries, last_exc)
-    return None
+    log.warning("skipping %s this run after %d failed attempts (%s)", url, retries, last_exc)
+    return Unavailable(str(last_exc))
 
 
 def _probe_price_format(compressed: bytes) -> str:
@@ -364,6 +379,9 @@ def _probe(
 
         comp = _download_bi5(url, cache_path=cache_path, timeout=timeout, retries=retries)
 
+        if isinstance(comp, Unavailable):
+            print(f"{symbol}: could not fetch probe hour {hour.isoformat()}: {comp.error}")
+            continue
         if comp is None or len(comp) == 0:
             print(f"{symbol}: no data for probe hour {hour.isoformat()}")
             continue
@@ -819,6 +837,7 @@ def export_range(
     # counters
     hours_total = 0
     hours_missing_404 = 0
+    hours_unavailable = 0
     hours_empty_200 = 0
     hours_downloaded = 0
     hours_decode_failed = 0
@@ -850,6 +869,8 @@ def export_range(
     # written to daily CSVs until they age past commit_partial_after_days, at
     # which point the gap is treated as permanent and the day is partial-committed.
     day_perm_gap: set[date] = set()
+    # Days with an hour this run could not fetch: never committed, retried next run.
+    day_unavailable: set[date] = set()
     # Days rejected by the scale-sentry (price-scale divergence). These must
     # NEVER be partial-committed — they need a re-run with the correct
     # --price-divisor, not commitment. Scale-rejection dominates a gap.
@@ -977,7 +998,7 @@ def export_range(
         progress.update(dl_task_id, advance=n_cached_hours)
 
     # Download hours in parallel
-    def download_hour(hour_start: datetime) -> tuple[datetime, bytes | None]:
+    def download_hour(hour_start: datetime) -> tuple[datetime, bytes | None | Unavailable]:
         """Download a single hour's tick data."""
         try:
             check_cancelled()
@@ -1004,7 +1025,7 @@ def export_range(
             raise
         except Exception as e:
             log.debug(f"Download failed for {hour_start}: {e}")
-            return (hour_start, None)
+            return (hour_start, Unavailable(str(e)))
 
     next_to_process = 0  # Index in hours_to_fetch
 
@@ -1039,6 +1060,13 @@ def export_range(
                 progress.update(cache_task_id, advance=1)
 
         if cache_dir is None:
+            _advance_cache_progress()
+            return
+
+        # A day with an hour this run could not fetch is never committed, whole
+        # or partial, whatever its age: the hour may exist. Its downloaded bi5
+        # stay in place for the next run.
+        if day in day_unavailable:
             _advance_cache_progress()
             return
 
@@ -1132,7 +1160,7 @@ def export_range(
 
     def _process_ready_hours() -> None:
         nonlocal next_to_process, hours_missing_404, hours_empty_200, hours_downloaded
-        nonlocal hours_decode_failed, hours_resampled_nonempty, detected_format
+        nonlocal hours_unavailable, hours_decode_failed, hours_resampled_nonempty, detected_format
         nonlocal hours_loaded_from_cache
 
         while next_to_process < len(hours_to_fetch):
@@ -1173,6 +1201,15 @@ def export_range(
                     if ask_candles is not None and not ask_candles.empty:
                         all_1min_ask_frames.append(ask_candles)
                 _advance_resample_progress()
+                continue
+
+            # --- Could not fetch this run (timeouts, 429, 5xx): not a gap ---
+            if isinstance(comp, Unavailable):
+                hours_unavailable += 1
+                day_unavailable.add(current_day)
+                _advance_resample_progress()
+                if is_last_hour_of_day:
+                    _flush_day(current_day)
                 continue
 
             # --- 404: no data for this hour ---
@@ -1236,6 +1273,13 @@ def export_range(
                     timeout=timeout,
                     retries=retries,
                 )
+                if isinstance(comp2, Unavailable):
+                    hours_unavailable += 1
+                    day_unavailable.add(current_day)
+                    _advance_resample_progress()
+                    if is_last_hour_of_day:
+                        _flush_day(current_day)
+                    continue
                 if comp2 is None:
                     _mark_perm_gap(current_day, current_hour.hour, "decode_failed")
                     _advance_resample_progress()
@@ -1322,12 +1366,19 @@ def export_range(
     log.info(
         f"{symbol}: hours total={hours_total}, missing_404={hours_missing_404}, "
         f"missing_200={hours_empty_200}, downloaded={hours_downloaded}, "
+        f"unavailable={hours_unavailable}, "
         f"decode_failed={hours_decode_failed}, "
         f"resampled_nonempty={hours_resampled_nonempty}, "
         f"loaded_from_cache={hours_loaded_from_cache}, "
         f"days_rejected_scale_sentry={days_rejected_scale_sentry}, "
-        f"days_committed_partial={days_committed_partial}"
+        f"days_committed_partial={days_committed_partial}, "
+        f"days_left_for_retry={len(day_unavailable)}"
     )
+    if day_unavailable:
+        log.warning(
+            f"{symbol}: {hours_unavailable} hour(s) could not be fetched this run; "
+            f"{len(day_unavailable)} day(s) left uncommitted. Re-run to retry them."
+        )
 
     if resample_rule is None:
         return (None, None)

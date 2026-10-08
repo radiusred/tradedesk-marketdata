@@ -123,3 +123,21 @@ def test_retry_then_success_caches_payload(cache_dir: Path, monkeypatch):
     assert result == payload
     assert cache_path.exists()
     assert cache_path.read_bytes() == payload
+
+
+def test_exhausted_retries_return_unavailable_not_none(cache_dir: Path, monkeypatch):
+    """Timeouts and 5xx after every attempt are reported as Unavailable, which the
+    exporter treats as "retry next run"; None is reserved for a genuine 404."""
+    import requests
+
+    def fake_get(*_, **__):
+        raise requests.ConnectionError("synthetic timeout")
+
+    monkeypatch.setattr(ex._SESSION, "get", fake_get)
+    monkeypatch.setattr(ex, "RETRY_BASE_DELAY", 0.01)
+
+    result = ex._download_bi5("http://example.com/x.bi5", cache_dir / "x.bi5", retries=2)
+
+    assert isinstance(result, ex.Unavailable)
+    assert "synthetic timeout" in result.error
+    assert not (cache_dir / "x.bi5").exists()

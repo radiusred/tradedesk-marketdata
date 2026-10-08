@@ -465,6 +465,13 @@ hours that *did* decode once the day is older than `N` days (default `7`).
 Younger gap days still get the original "leave the bi5 in place and retry
 next run" treatment.
 
+An hour that merely could not be fetched *this run* — timeouts, HTTP 429 or
+5xx after every retry — is not a gap. Its day is never committed, whole or
+partial, whatever its age; the hours that did download keep their `.bi5`, the
+summary reports `unavailable=N … days_left_for_retry=M`, and re-running fills
+them in. Only a genuine 404 or an undecodable payload counts towards a
+partial commit.
+
 ```bash
 tradedesk-md-export --symbols LIGHTCMDUSD \
   --from 2022-01-01 --to 2022-12-31 \
