@@ -95,3 +95,94 @@ def test_main_does_not_write_sidecar_when_no_output_csvs(monkeypatch, tmp_path: 
 
     assert rc == 0
     assert sidecars_written == []
+
+
+def test_parser_network_defaults_match_export_module() -> None:
+    import tradedesk_dukascopy.export as ex
+
+    args = cli.build_parser().parse_args(
+        ["--symbols", "EURUSD", "--from", "2025-07-01", "--to", "2025-07-01"]
+    )
+    assert args.connect_timeout == ex.DEFAULT_CONNECT_TIMEOUT
+    assert args.read_timeout == ex.DEFAULT_READ_TIMEOUT
+    assert args.retries == ex.DEFAULT_RETRIES
+
+
+def test_main_passes_timeouts_and_retries_to_export_tasks(monkeypatch, tmp_path: Path) -> None:
+    captured: list[par.ExportTask] = []
+
+    def fake_run_parallel_exports(tasks, max_workers):
+        captured.extend(tasks)
+        return [ExportResult(symbol=t.symbol, output_csvs=[], success=True) for t in tasks]
+
+    monkeypatch.setattr(par, "run_parallel_exports", fake_run_parallel_exports)
+
+    rc = cli.main(
+        [
+            "--symbols",
+            "EURUSD",
+            "GBPUSD",
+            "--from",
+            "2025-07-01",
+            "--to",
+            "2025-07-01",
+            "--cache-dir",
+            str(tmp_path),
+            "--connect-timeout",
+            "15",
+            "--read-timeout",
+            "90",
+            "--retries",
+            "5",
+        ]
+    )
+
+    assert rc == 0
+    assert [t.symbol for t in captured] == ["EURUSD", "GBPUSD"]
+    assert all(t.timeout == (15.0, 90.0) and t.retries == 5 for t in captured)
+
+
+def test_main_passes_timeouts_and_retries_to_probe(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_export_range(**kwargs):
+        seen.update(kwargs)
+        return (None, None)
+
+    monkeypatch.setattr(cli, "export_range", fake_export_range)
+
+    rc = cli.main(
+        [
+            "--symbols",
+            "EURUSD",
+            "--from",
+            "2025-07-01",
+            "--to",
+            "2025-07-01",
+            "--probe",
+            "--no-cache",
+            "--connect-timeout",
+            "15",
+            "--read-timeout",
+            "90",
+            "--retries",
+            "5",
+        ]
+    )
+
+    assert rc == 0
+    assert seen["probe"] is True
+    assert seen["timeout"] == (15.0, 90.0)
+    assert seen["retries"] == 5
+
+
+def test_main_rejects_non_positive_timeouts_and_zero_retries() -> None:
+    import pytest
+
+    base = ["--symbols", "EURUSD", "--from", "2025-07-01", "--to", "2025-07-01"]
+    with pytest.raises(SystemExit):
+        cli.main(base + ["--read-timeout", "0"])
+    with pytest.raises(SystemExit):
+        cli.main(base + ["--connect-timeout", "-1"])
+    with pytest.raises(SystemExit):
+        cli.main(base + ["--retries", "0"])

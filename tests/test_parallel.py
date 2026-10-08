@@ -110,3 +110,35 @@ def test_run_parallel_exports_reports_failed_symbol(monkeypatch, tmp_path):
 def test_run_parallel_exports_empty_task_list(monkeypatch):
     results = par.run_parallel_exports([], max_workers=2)
     assert results == []
+
+
+def test_export_worker_forwards_timeouts_and_retries(monkeypatch, tmp_path):
+    """A task carrying network settings passes them to export_range; one without
+    leaves export_range's own defaults in force."""
+    from datetime import UTC, datetime
+
+    import tradedesk_dukascopy.export as ex
+    import tradedesk_dukascopy.parallel as par
+
+    seen: list[dict] = []
+
+    def fake_export_range(**kwargs):
+        seen.append(kwargs)
+        return (None, None)
+
+    monkeypatch.setattr(ex, "export_range", fake_export_range)
+
+    common = dict(
+        symbol="EURUSD",
+        start_utc=datetime(2025, 7, 1, tzinfo=UTC),
+        end_utc_inclusive=datetime(2025, 7, 1, tzinfo=UTC),
+        resample_rule=None,
+        price_divisor=1.0,
+        cache_dir=tmp_path,
+        out=tmp_path,
+    )
+    par._export_worker(par.ExportTask(**common, timeout=(15.0, 90.0), retries=5))
+    par._export_worker(par.ExportTask(**common))
+
+    assert seen[0]["timeout"] == (15.0, 90.0) and seen[0]["retries"] == 5
+    assert "timeout" not in seen[1] and "retries" not in seen[1]

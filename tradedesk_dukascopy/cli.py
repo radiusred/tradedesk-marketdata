@@ -7,7 +7,12 @@ from pathlib import Path
 
 from rich.logging import RichHandler
 
-from .export import export_range
+from .export import (
+    DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_READ_TIMEOUT,
+    DEFAULT_RETRIES,
+    export_range,
+)
 from .metadata import ExportMetadata, now_iso_utc, write_sidecar
 
 # Map CLI --log-level choices that are not valid stdlib `logging` level names
@@ -113,6 +118,26 @@ def build_parser() -> argparse.ArgumentParser:
         "immediately (orphan-cache backfill sweep). Default: 7",
     )
     p.add_argument(
+        "--connect-timeout",
+        type=float,
+        default=DEFAULT_CONNECT_TIMEOUT,
+        help="Seconds to wait for a connection to the datafeed on each request "
+        f"(default: {DEFAULT_CONNECT_TIMEOUT:g})",
+    )
+    p.add_argument(
+        "--read-timeout",
+        type=float,
+        default=DEFAULT_READ_TIMEOUT,
+        help="Seconds to wait for the datafeed to answer on each request; a slow "
+        f"datafeed needs this raised, not --retries (default: {DEFAULT_READ_TIMEOUT:g})",
+    )
+    p.add_argument(
+        "--retries",
+        type=int,
+        default=DEFAULT_RETRIES,
+        help=f"Attempts per hour before it is skipped for this run (default: {DEFAULT_RETRIES})",
+    )
+    p.add_argument(
         "--probe",
         action="store_true",
         help="Probe one hour and print decoded ticks; no files written.",
@@ -157,6 +182,11 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--to must be >= --from")
     if args.commit_partial_after_days < 0:
         raise SystemExit("--commit-partial-after-days must be >= 0")
+    if args.connect_timeout <= 0 or args.read_timeout <= 0:
+        raise SystemExit("--connect-timeout and --read-timeout must be > 0")
+    if args.retries < 1:
+        raise SystemExit("--retries must be >= 1")
+    timeout = (args.connect_timeout, args.read_timeout)
 
     configure_logging(level=args.log_level)
 
@@ -183,6 +213,8 @@ def main(argv: list[str] | None = None) -> int:
             probe=True,
             probe_ticks=args.probe_ticks,
             out=Path(tempfile.gettempdir()),
+            timeout=timeout,
+            retries=args.retries,
         )
 
         return 0
@@ -203,6 +235,8 @@ def main(argv: list[str] | None = None) -> int:
             cache_dir=cache_dir,
             out=out,
             commit_partial_after_days=args.commit_partial_after_days,
+            timeout=timeout,
+            retries=args.retries,
         )
         for symbol in args.symbols
     ]

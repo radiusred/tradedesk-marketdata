@@ -270,6 +270,25 @@ to stay near the safest limit of two concurrent download threads, keep
 `--workers 1`. Re-running the same command is idempotent and is the intended way
 to fill cache gaps caused by failed hours.
 
+### Timeouts and retries (`--connect-timeout`, `--read-timeout`, `--retries`)
+
+Every datafeed request waits `--connect-timeout` seconds (default `2`) for a
+connection and `--read-timeout` seconds (default `10`) for the answer, and an
+hour is attempted `--retries` times (default `3`, with exponential backoff)
+before it is skipped for this run. Under load the datafeed can take 20 s or
+more to deliver a single hour, so a run that logs mostly timeouts is usually
+giving up on answers that were on their way; raising the read timeout (and
+keeping `--workers 1`) recovers them, and costs nothing when the datafeed is
+quick. Rate limiting (HTTP 429) is per client address: more concurrency makes
+it worse, longer timeouts do not.
+
+```bash
+tradedesk-dc-export --symbols USA500IDXUSD \
+  --from 2010-01-01 --to 2019-12-31 \
+  --cache-dir /opt/tradedesk/marketdata --price-divisor 1 \
+  --workers 1 --connect-timeout 15 --read-timeout 90 --retries 5
+```
+
 ### Committing days with permanent gaps (`--commit-partial-after-days`)
 
 Some historical Dukascopy hours never return tick data — they 404 or hand back

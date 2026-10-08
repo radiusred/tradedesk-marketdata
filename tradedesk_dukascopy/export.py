@@ -56,6 +56,12 @@ UA = "tradedesk/1.0 bi5-export (https://github.com/radiusred/tradedesk-dukascopy
 RETRY_BASE_DELAY = 0.8  # seconds
 RETRY_MAX_DELAY = 6.0  # seconds
 RETRY_BACKOFF_FACTOR = 2.5
+# Per-request HTTP timeouts (connect, read) in seconds and attempts per hour.
+# Dukascopy's datafeed can take 20 s+ to answer a single hour under load, so
+# these are overridable from the CLI (--connect-timeout, --read-timeout, --retries).
+DEFAULT_CONNECT_TIMEOUT = 2.0
+DEFAULT_READ_TIMEOUT = 10.0
+DEFAULT_RETRIES = 3
 # Download parallelisation
 DOWNLOAD_THREADS_PER_INSTRUMENT = 2
 
@@ -126,8 +132,8 @@ def _dukascopy_tick_url(symbol: str, hour_start: datetime) -> str:
 def _download_bi5(
     url: str,
     cache_path: Path | None,
-    timeout: tuple[float, float] = (3.0, 15.0),
-    retries: int = 3,
+    timeout: tuple[float, float] = (DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT),
+    retries: int = DEFAULT_RETRIES,
 ) -> bytes | None:
     """
     Returns compressed bytes.
@@ -335,6 +341,8 @@ def _probe(
     cache_dir: Path | None,
     probe_ticks: int,
     price_divisor: float | None,
+    timeout: tuple[float, float] = (DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT),
+    retries: int = DEFAULT_RETRIES,
 ) -> None:
     for hour in hours:
         url = _dukascopy_tick_url(symbol, hour)
@@ -349,7 +357,7 @@ def _probe(
                 / f"{hour.hour:02d}h_ticks.bi5"
             )
 
-        comp = _download_bi5(url, cache_path=cache_path, timeout=(2.0, 10.0), retries=3)
+        comp = _download_bi5(url, cache_path=cache_path, timeout=timeout, retries=retries)
 
         if comp is None or len(comp) == 0:
             print(f"{symbol}: no data for probe hour {hour.isoformat()}")
@@ -609,6 +617,8 @@ def export_range(
     probe_ticks: int = 10,
     commit_partial_after_days: int = 7,
     progress: "Progress | None" = None,
+    timeout: tuple[float, float] = (DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT),
+    retries: int = DEFAULT_RETRIES,
 ) -> tuple[Path | None, Path | None]:
     """
     Export [start_utc, end_utc_inclusive] into two CSVs: one for bid prices, one for ask.
@@ -643,6 +653,11 @@ def export_range(
         decode-failure hours) is committed from its available hours instead of
         being left for retry. Default 7. ``0`` commits any permanent-gap day
         immediately (used by the orphan-cache backfill sweep).
+
+    timeout, retries:
+        The per-request ``(connect, read)`` timeout in seconds and the number of
+        attempts per hour, applied to every datafeed request this export makes
+        (probe, download, and the re-download after a decode failure).
     """
 
     # counters
@@ -695,7 +710,15 @@ def export_range(
     # Probe mode: check only first 24 hours, probe the first that works, and exit immediately
     if probe:
         log.info(f"Running probe for {symbol} starting at {start_utc.isoformat()}")
-        _probe(symbol, hours_to_fetch[0:24], cache_dir, probe_ticks, price_divisor)
+        _probe(
+            symbol,
+            hours_to_fetch[0:24],
+            cache_dir,
+            probe_ticks,
+            price_divisor,
+            timeout=timeout,
+            retries=retries,
+        )
         return (None, None)
 
     # Pre-check: identify days where daily 1-min candle CSVs already exist.
@@ -813,7 +836,7 @@ def export_range(
                     / f"{hour_start.hour:02d}h_ticks.bi5"
                 )
 
-            comp = _download_bi5(url, cache_path=cache_path, timeout=(2.0, 10.0), retries=3)
+            comp = _download_bi5(url, cache_path=cache_path, timeout=timeout, retries=retries)
 
             if progress is not None and dl_task_id is not None:
                 progress.update(dl_task_id, advance=1)
@@ -1049,7 +1072,10 @@ def export_range(
                         log.error(f"{symbol}: rm failed: suspect cache file: {cache_path}")
 
                 comp2 = _download_bi5(
-                    _dukascopy_tick_url(symbol, current_hour), cache_path=cache_path
+                    _dukascopy_tick_url(symbol, current_hour),
+                    cache_path=cache_path,
+                    timeout=timeout,
+                    retries=retries,
                 )
                 if comp2 is None:
                     _mark_perm_gap(current_day, current_hour.hour, "decode_failed")

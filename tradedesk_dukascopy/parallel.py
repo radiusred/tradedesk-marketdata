@@ -34,6 +34,8 @@ class ExportTask:
     cache_dir: Path | None
     out: Path
     commit_partial_after_days: int = 7
+    timeout: tuple[float, float] | None = None
+    retries: int | None = None
 
 
 @dataclass
@@ -50,6 +52,14 @@ def _export_worker(task: ExportTask, progress: Progress | None = None) -> Export
     """Worker function to export a single symbol."""
     from tradedesk_dukascopy.export import export_range
 
+    # None means "the export module's default", so a task built without the
+    # network settings behaves exactly as before.
+    network: dict[str, object] = {}
+    if task.timeout is not None:
+        network["timeout"] = task.timeout
+    if task.retries is not None:
+        network["retries"] = task.retries
+
     try:
         bid_csv, ask_csv = export_range(
             symbol=task.symbol,
@@ -63,6 +73,7 @@ def _export_worker(task: ExportTask, progress: Progress | None = None) -> Export
             commit_partial_after_days=task.commit_partial_after_days,
             out=task.out,
             progress=progress,
+            **network,  # type: ignore[arg-type]
         )
         output_csvs = [p for p in (bid_csv, ask_csv) if p is not None]
         return ExportResult(symbol=task.symbol, output_csvs=output_csvs, success=True)
