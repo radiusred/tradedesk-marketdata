@@ -30,9 +30,7 @@
 # instrument list on 2026-10-08. Scales were checked against the median close of
 # Dukascopy days for the same instrument, except where scale_verified is false.
 # Not on HistData, so not mapped: EURSGD, GBPEUR, BTCUSD.
-#
-# TODO(#83): ship the DEUIDXEUR span (GRXEUR carries other index levels over
-# part of its history) once that task confirms its bounds.
+
 
 # --- Indices and commodities: HistData uses its own codes -------------------
 
@@ -43,11 +41,18 @@ first_month = "2010-11"
 scale_verified = true
 scale_evidence = "Dukascopy median close ~4782"
 
+# From 2020-06-17 to 2023-12-05 HistData's GRXEUR runs at about 0.26x the DAX,
+# its session ends an hour earlier, and its levels track the Euro Stoxx 50
+# (3331 on 2020-09-15, 4152 on 2021-06-15, 4318 on 2023-11-16); outside the
+# span it matches a Dukascopy DEUIDXEUR cache day by day.
 [symbols.DEUIDXEUR]
 name = "GRXEUR"
 scale = 1
 first_month = "2010-11"
 scale_verified = true
+exclude = [
+  { from = 2020-06-17, to = 2023-12-05, reason = "GRXEUR carries Euro Stoxx 50 levels, not the DAX" },
+]
 
 [symbols.GBRIDXGBP]
 name = "UKXGBP"
