@@ -348,7 +348,7 @@ name = "SPXUSD"                  # HistData's instrument code
 scale = 1                        # cache raw price = HistData decimal price x scale
 first_month = "2010-11"          # earliest month HistData serves
 scale_verified = true            # the scale was confirmed against another source
-scale_evidence = "Dukascopy median close ~4782"
+scale_evidence = "Dukascopy 2024-01-10: raw 4786.2"
 exclude = [                      # optional: days never to commit from HistData
   { from = 2020-06-17, to = 2020-06-19, reason = "the series carries another index" },
 ]
@@ -378,28 +378,33 @@ a file that does not follow this schema is a usage error.
 
 The shipped map:
 
-| Cache symbol | HistData | Scale | First month | Verified (Dukascopy figure) |
+| Cache symbol | HistData | Scale | First month | Verified (Dukascopy evidence) |
 |---|---|---|---|---|
-| USA500IDXUSD | SPXUSD | 1 | 2010-11 | yes (median close ~4782) |
-| DEUIDXEUR | GRXEUR | 1 | 2010-11 | no; 2020-06-17..2023-12-05 excluded (below) |
-| GBRIDXGBP | UKXGBP | 1 | 2010-11 | no |
-| JPNIDXJPY | JPXJPY | 1 | 2010-11 | no |
-| AUSIDXAUD | AUXAUD | 1 | 2010-11 | no |
-| BRENTCMDUSD | BCOUSD | 100 | 2010-11 | yes (2022-02-21: raw 9712.8 for 97.128) |
-| XAUUSD | XAUUSD | 100 | 2009-03 | yes (median close ~151948) |
-| EURUSD | EURUSD | 10000 | 2000-05 | yes (median close ~11217) |
-| GBPUSD, USDCHF | same | 10000 | 2000-05 | no |
-| AUDUSD, USDCAD | same | 10000 | 2000-06 | no |
-| USDJPY | USDJPY | 100 | 2000-05 | yes (median close ~12029) |
-| GBPJPY | GBPJPY | 100 | 2002-05 | no |
-| AUDJPY, CHFJPY | same | 100 | 2002-08 | no |
-| EURCHF, EURGBP | same | 10000 | 2002-03 | no |
-| GBPCHF | GBPCHF | 10000 | 2002-08 | no |
-| EURCAD | EURCAD | 10000 | 2007-03 | no |
-| AUDCAD | AUDCAD | 10000 | 2007-07 | no |
-| AUDNZD, GBPAUD | same | 10000 | 2007-09 | no |
-| NZDCAD | NZDCAD | 10000 | 2008-03 | no |
-| EURSEK | EURSEK | 10000 | 2008-08 | no |
+| USA500IDXUSD | SPXUSD | 1 | 2010-11 | yes: 2024-01-10: raw 4786.2 |
+| DEUIDXEUR | GRXEUR | 1 | 2010-11 | yes: 2024-01-10: raw 16734.2; 2020-06-17..2023-12-05 excluded (below) |
+| GBRIDXGBP | UKXGBP | 1 | 2010-11 | yes: 2024-01-10: raw 7660.91 |
+| JPNIDXJPY | JPXJPY | 1 | 2010-11 | yes: 2024-01-10: raw 34928.6 |
+| AUSIDXAUD | AUXAUD | 1 | 2010-11 | yes: 2024-01-10: raw 7494.43 |
+| BRENTCMDUSD | BCOUSD | 100 | 2010-11 | yes: 2022-02-21: raw 9712.8 for 97.128 |
+| XAUUSD | XAUUSD | 100 | 2009-03 | yes: 2024-01-10: raw 202698 |
+| EURUSD | EURUSD | 10000 | 2000-05 | yes: 2024-01-10: raw 10974.3 |
+| GBPUSD | GBPUSD | 10000 | 2000-05 | yes: 2024-01-10: raw 12745.4 |
+| USDCHF | USDCHF | 10000 | 2000-05 | yes: 2024-01-10: raw 8506.1 |
+| AUDUSD | AUDUSD | 10000 | 2000-06 | yes: 2024-01-10: raw 6702.6 |
+| USDCAD | USDCAD | 10000 | 2000-06 | yes: 2024-01-10: raw 13380.8 |
+| USDJPY | USDJPY | 100 | 2000-05 | yes: 2024-01-10: raw 14573.2 |
+| GBPJPY | GBPJPY | 100 | 2002-05 | yes: 2024-01-10: raw 18574.1 |
+| AUDJPY | AUDJPY | 100 | 2002-08 | yes: 2024-01-10: raw 9767.2 |
+| CHFJPY | CHFJPY | 100 | 2002-08 | yes: 2024-01-10: raw 17134.1 |
+| EURCHF | EURCHF | 10000 | 2002-03 | yes: 2024-01-10: raw 9335.1 |
+| EURGBP | EURGBP | 10000 | 2002-03 | yes: 2024-01-10: raw 8611.3 |
+| GBPCHF | GBPCHF | 10000 | 2002-08 | yes: 2024-01-10: raw 10841.4 |
+| EURCAD | EURCAD | 10000 | 2007-03 | yes: 2024-01-10: raw 14683.6 |
+| AUDCAD | AUDCAD | 10000 | 2007-07 | yes: 2024-01-10: raw 8968 |
+| AUDNZD | AUDNZD | 10000 | 2007-09 | yes: 2024-01-10: raw 10761 |
+| GBPAUD | GBPAUD | 10000 | 2007-09 | yes: 2024-01-10: raw 19018.4 |
+| NZDCAD | NZDCAD | 10000 | 2008-03 | yes: 2024-01-10: raw 8334.8 |
+| EURSEK | EURSEK | 10000 | 2008-08 | no (no Dukascopy day to compare with) |
 
 The map's `[histdata]` section holds settings for every instrument:
 `max_month_join_step` (default `0.7`) is the threshold of the month-join level

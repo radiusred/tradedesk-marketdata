@@ -28,11 +28,12 @@
 #
 # Names and first months were checked against histdata.com's tick-data
 # instrument list on 2026-10-08. An entry is verified only where the Dukascopy
-# figure that confirmed its scale is recorded in scale_evidence. The others
-# follow the convention above and were checked when the map was first written,
-# but their figures were not recorded, so they are unverified. To verify one,
-# compare a decoded HistData day with a Dukascopy-built day of the same
-# instrument and date, and record both values.
+# figure that confirmed its scale is recorded in scale_evidence: the ask close
+# in cache raw units of a Dukascopy-built day that the HistData-decoded day
+# matches exactly (2024-01-10, a winter day, for all but Brent). EURSEK has no
+# Dukascopy day to compare with, so it is unverified. To verify an entry in
+# your copy, compare a decoded HistData day with a Dukascopy-built day of the
+# same instrument and date, and record the value.
 # Not on HistData, so not mapped: EURSGD, GBPEUR, BTCUSD.
 
 
@@ -54,7 +55,7 @@ name = "SPXUSD"
 scale = 1
 first_month = "2010-11"
 scale_verified = true
-scale_evidence = "Dukascopy median close ~4782"
+scale_evidence = "Dukascopy 2024-01-10: raw 4786.2"
 
 # From 2020-06-17 to 2023-12-05 HistData's GRXEUR runs at about 0.26x the DAX,
 # its session ends an hour earlier, and its levels track the Euro Stoxx 50
@@ -64,7 +65,8 @@ scale_evidence = "Dukascopy median close ~4782"
 name = "GRXEUR"
 scale = 1
 first_month = "2010-11"
-scale_verified = false
+scale_verified = true
+scale_evidence = "Dukascopy 2024-01-10: raw 16734.2"
 exclude = [
   { from = 2020-06-17, to = 2023-12-05, reason = "GRXEUR carries Euro Stoxx 50 levels, not the DAX" },
 ]
@@ -73,19 +75,22 @@ exclude = [
 name = "UKXGBP"
 scale = 1
 first_month = "2010-11"
-scale_verified = false
+scale_verified = true
+scale_evidence = "Dukascopy 2024-01-10: raw 7660.91"
 
 [symbols.JPNIDXJPY]
 name = "JPXJPY"
 scale = 1
 first_month = "2010-11"
-scale_verified = false
+scale_verified = true
+scale_evidence = "Dukascopy 2024-01-10: raw 34928.6"
 
 [symbols.AUSIDXAUD]
 name = "AUXAUD"
 scale = 1
 first_month = "2010-11"
-scale_verified = false
+scale_verified = true
+scale_evidence = "Dukascopy 2024-01-10: raw 7494.43"
 
 # Dukascopy's raw unit for Brent is cents: 9712.8 for HistData's 97.128.
 [symbols.BRENTCMDUSD]
@@ -100,7 +105,7 @@ name = "XAUUSD"
 scale = 100
 first_month = "2009-03"
 scale_verified = true
-scale_evidence = "Dukascopy median close ~151948"
+scale_evidence = "Dukascopy 2024-01-10: raw 202698"
 
 # --- FX: the same names on both sides ----------------------------------------
 
@@ -108,49 +113,57 @@ scale_evidence = "Dukascopy median close ~151948"
 name = "AUDCAD"
 scale = 10000
 first_month = "2007-07"
-scale_verified = false
+scale_verified = true
+scale_evidence = "Dukascopy 2024-01-10: raw 8968"
 
 [symbols.AUDJPY]
 name = "AUDJPY"
 scale = 100
 first_month = "2002-08"
-scale_verified = false
+scale_verified = true
+scale_evidence = "Dukascopy 2024-01-10: raw 9767.2"
 
 [symbols.AUDNZD]
 name = "AUDNZD"
 scale = 10000
 first_month = "2007-09"
-scale_verified = false
+scale_verified = true
+scale_evidence = "Dukascopy 2024-01-10: raw 10761"
 
 [symbols.AUDUSD]
 name = "AUDUSD"
 scale = 10000
 first_month = "2000-06"
-scale_verified = false
+scale_verified = true
+scale_evidence = "Dukascopy 2024-01-10: raw 6702.6"
 
 [symbols.CHFJPY]
 name = "CHFJPY"
 scale = 100
 first_month = "2002-08"
-scale_verified = false
+scale_verified = true
+scale_evidence = "Dukascopy 2024-01-10: raw 17134.1"
 
 [symbols.EURCAD]
 name = "EURCAD"
 scale = 10000
 first_month = "2007-03"
-scale_verified = false
+scale_verified = true
+scale_evidence = "Dukascopy 2024-01-10: raw 14683.6"
 
 [symbols.EURCHF]
 name = "EURCHF"
 scale = 10000
 first_month = "2002-03"
-scale_verified = false
+scale_verified = true
+scale_evidence = "Dukascopy 2024-01-10: raw 9335.1"
 
 [symbols.EURGBP]
 name = "EURGBP"
 scale = 10000
 first_month = "2002-03"
-scale_verified = false
+scale_verified = true
+scale_evidence = "Dukascopy 2024-01-10: raw 8611.3"
 
 # Follows the 4-decimal FX convention; no Dukascopy day was available to confirm it.
 [symbols.EURSEK]
@@ -164,53 +177,60 @@ name = "EURUSD"
 scale = 10000
 first_month = "2000-05"
 scale_verified = true
-scale_evidence = "Dukascopy median close ~11217"
+scale_evidence = "Dukascopy 2024-01-10: raw 10974.3"
 
 [symbols.GBPAUD]
 name = "GBPAUD"
 scale = 10000
 first_month = "2007-09"
-scale_verified = false
+scale_verified = true
+scale_evidence = "Dukascopy 2024-01-10: raw 19018.4"
 
 [symbols.GBPCHF]
 name = "GBPCHF"
 scale = 10000
 first_month = "2002-08"
-scale_verified = false
+scale_verified = true
+scale_evidence = "Dukascopy 2024-01-10: raw 10841.4"
 
 [symbols.GBPJPY]
 name = "GBPJPY"
 scale = 100
 first_month = "2002-05"
-scale_verified = false
+scale_verified = true
+scale_evidence = "Dukascopy 2024-01-10: raw 18574.1"
 
 [symbols.GBPUSD]
 name = "GBPUSD"
 scale = 10000
 first_month = "2000-05"
-scale_verified = false
+scale_verified = true
+scale_evidence = "Dukascopy 2024-01-10: raw 12745.4"
 
 [symbols.NZDCAD]
 name = "NZDCAD"
 scale = 10000
 first_month = "2008-03"
-scale_verified = false
+scale_verified = true
+scale_evidence = "Dukascopy 2024-01-10: raw 8334.8"
 
 [symbols.USDCAD]
 name = "USDCAD"
 scale = 10000
 first_month = "2000-06"
-scale_verified = false
+scale_verified = true
+scale_evidence = "Dukascopy 2024-01-10: raw 13380.8"
 
 [symbols.USDCHF]
 name = "USDCHF"
 scale = 10000
 first_month = "2000-05"
-scale_verified = false
+scale_verified = true
+scale_evidence = "Dukascopy 2024-01-10: raw 8506.1"
 
 [symbols.USDJPY]
 name = "USDJPY"
 scale = 100
 first_month = "2000-05"
 scale_verified = true
-scale_evidence = "Dukascopy median close ~12029"
+scale_evidence = "Dukascopy 2024-01-10: raw 14573.2"
