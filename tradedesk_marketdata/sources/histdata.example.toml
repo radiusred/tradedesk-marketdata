@@ -1,0 +1,197 @@
+# HistData.com symbol map for `tradedesk-md-export --source histdata`.
+#
+# This file ships with the package and is used when --symbol-map is not given.
+# To change it, copy it, edit the copy and pass `--symbol-map your-copy.toml`.
+# A symbol that has no entry here is refused before any request is made.
+#
+# One table per cache symbol (the name the day files are written under):
+#
+#   [symbols.<CACHE SYMBOL>]
+#   name           = HistData's instrument code (required)
+#   scale          = cache raw price = HistData decimal price x scale (required, > 0)
+#   first_month    = earliest month HistData serves ticks for, "YYYY-MM" (required)
+#   scale_verified = true once the scale has been confirmed against another
+#                    source's raw values for the same instrument (default false;
+#                    an export of an unverified symbol logs a warning)
+#   scale_evidence = what confirmed it (optional, text)
+#   exclude        = spans whose HistData data must not be committed (optional):
+#                    [{ from = YYYY-MM-DD, to = YYYY-MM-DD, reason = "..." }, ...]
+#                    A day inside a span gets no day files and an "excluded"
+#                    record in _sources.jsonl with the reason, so another source
+#                    can fill it; it is not fetched again until the span goes.
+#
+# Scales. The cache stores the raw units of the Dukascopy datafeed, so HistData's
+# decimal prices are multiplied on decode:
+#   10000  FX quoted to a 0.0001 pip:      1.10366   -> 11036.6
+#   100    JPY-quoted FX and gold:         179.601   -> 17960.1, 2063.625 -> 206362.5
+#   1      indices, in points, as quoted:  4774.361  -> 4774.361
+#
+# Names and first months were checked against histdata.com's tick-data
+# instrument list on 2026-10-08. Scales were checked against the median close of
+# Dukascopy days for the same instrument, except where scale_verified is false.
+# Not on HistData, so not mapped: EURSGD, GBPEUR, BTCUSD.
+#
+# TODO(#83): ship the DEUIDXEUR span (GRXEUR carries other index levels over
+# part of its history) once that task confirms its bounds.
+
+# --- Indices and commodities: HistData uses its own codes -------------------
+
+[symbols.USA500IDXUSD]
+name = "SPXUSD"
+scale = 1
+first_month = "2010-11"
+scale_verified = true
+scale_evidence = "Dukascopy median close ~4782"
+
+[symbols.DEUIDXEUR]
+name = "GRXEUR"
+scale = 1
+first_month = "2010-11"
+scale_verified = true
+
+[symbols.GBRIDXGBP]
+name = "UKXGBP"
+scale = 1
+first_month = "2010-11"
+scale_verified = true
+
+[symbols.JPNIDXJPY]
+name = "JPXJPY"
+scale = 1
+first_month = "2010-11"
+scale_verified = true
+
+[symbols.AUSIDXAUD]
+name = "AUXAUD"
+scale = 1
+first_month = "2010-11"
+scale_verified = true
+
+# TODO(#84): Dukascopy's raw unit for Brent is cents (9712.8 where HistData
+# decodes 97.128), so this scale is believed to be 100. No Dukascopy day
+# confirmed it when the map was written: left at 1 and unverified until #84.
+[symbols.BRENTCMDUSD]
+name = "BCOUSD"
+scale = 1
+first_month = "2010-11"
+scale_verified = false
+
+[symbols.XAUUSD]
+name = "XAUUSD"
+scale = 100
+first_month = "2009-03"
+scale_verified = true
+scale_evidence = "Dukascopy median close ~151948"
+
+# --- FX: the same names on both sides ----------------------------------------
+
+[symbols.AUDCAD]
+name = "AUDCAD"
+scale = 10000
+first_month = "2007-07"
+scale_verified = true
+
+[symbols.AUDJPY]
+name = "AUDJPY"
+scale = 100
+first_month = "2002-08"
+scale_verified = true
+
+[symbols.AUDNZD]
+name = "AUDNZD"
+scale = 10000
+first_month = "2007-09"
+scale_verified = true
+
+[symbols.AUDUSD]
+name = "AUDUSD"
+scale = 10000
+first_month = "2000-06"
+scale_verified = true
+
+[symbols.CHFJPY]
+name = "CHFJPY"
+scale = 100
+first_month = "2002-08"
+scale_verified = true
+
+[symbols.EURCAD]
+name = "EURCAD"
+scale = 10000
+first_month = "2007-03"
+scale_verified = true
+
+[symbols.EURCHF]
+name = "EURCHF"
+scale = 10000
+first_month = "2002-03"
+scale_verified = true
+
+[symbols.EURGBP]
+name = "EURGBP"
+scale = 10000
+first_month = "2002-03"
+scale_verified = true
+
+# Follows the 4-decimal FX convention; no Dukascopy day was available to confirm it.
+[symbols.EURSEK]
+name = "EURSEK"
+scale = 10000
+first_month = "2008-08"
+scale_verified = false
+
+[symbols.EURUSD]
+name = "EURUSD"
+scale = 10000
+first_month = "2000-05"
+scale_verified = true
+scale_evidence = "Dukascopy median close ~11217"
+
+[symbols.GBPAUD]
+name = "GBPAUD"
+scale = 10000
+first_month = "2007-09"
+scale_verified = true
+
+[symbols.GBPCHF]
+name = "GBPCHF"
+scale = 10000
+first_month = "2002-08"
+scale_verified = true
+
+[symbols.GBPJPY]
+name = "GBPJPY"
+scale = 100
+first_month = "2002-05"
+scale_verified = true
+
+[symbols.GBPUSD]
+name = "GBPUSD"
+scale = 10000
+first_month = "2000-05"
+scale_verified = true
+
+[symbols.NZDCAD]
+name = "NZDCAD"
+scale = 10000
+first_month = "2008-03"
+scale_verified = true
+
+[symbols.USDCAD]
+name = "USDCAD"
+scale = 10000
+first_month = "2000-06"
+scale_verified = true
+
+[symbols.USDCHF]
+name = "USDCHF"
+scale = 10000
+first_month = "2000-05"
+scale_verified = true
+
+[symbols.USDJPY]
+name = "USDJPY"
+scale = 100
+first_month = "2000-05"
+scale_verified = true
+scale_evidence = "Dukascopy median close ~12029"

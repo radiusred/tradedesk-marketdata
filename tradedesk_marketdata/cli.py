@@ -207,7 +207,10 @@ def _configure_source(parser: argparse.ArgumentParser, args: argparse.Namespace)
             )
         )
     cls = sources.get(args.source)
-    return cls({opt.dest: getattr(args, opt.dest) for opt in cls.options})
+    try:
+        return cls({opt.dest: getattr(args, opt.dest) for opt in cls.options})
+    except SourceError as e:  # e.g. a configuration file the source cannot use
+        parser.error(str(e))
 
 
 def _wait_for_export_threads(log: logging.Logger) -> None:
