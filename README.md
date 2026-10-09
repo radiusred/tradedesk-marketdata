@@ -478,6 +478,60 @@ sources over an overlap.
 
 ---
 
+## Verifying a cache against a reference
+
+`tradedesk-md-verify` compares the day files of a cache with those of a
+reference cache of the same symbols, day by day. It reads both caches (with
+the exporter's own day-file reader), writes nothing, and works in parallel over
+the days; Ctrl-C stops it at once.
+
+```bash
+tradedesk-md-verify --reference ./cache-trusted --cache-dir ./cache-new \
+  --symbols EURUSD DEUIDXEUR BRENTCMDUSD --from 2020-01-01 --to 2024-12-31
+```
+
+For every day that has a file on either side it reports:
+
+- **Status:** one of `same`, `shifted`, `different`, `only-left`
+  (reference only), `only-right` (cache only) or `empty`.
+- **Minute-level identity:** for every whole-minute shift in ±180 min (30-min
+  steps), the fraction of the reference's minutes whose open, high, low and
+  close are identical in the cache at that shift. Volume is excluded unless
+  you pass `--include-volume`, because sources differ on it. A day that
+  matches only at a non-zero shift is `shifted`.
+- **Daily bars:** the largest relative difference of the day's
+  open/high/low/close. Above `--tolerance` (default `0.002`) the day is
+  `different`.
+
+Per symbol and year it prints the counts by status and the worst and median
+daily difference. It then prints the **close-ratio regimes**: runs of days
+whose reference/cache close ratio stays within 5% of one value.
+`--format json` gives the same as one document, with every day's record.
+`--side ask` compares the ask files instead of the bid ones.
+
+The findings are one line each. Here, with illustrative dates and counts, is
+how the three HistData defects showed before they were repaired:
+
+```text
+EURUSD 2024-06-03..2024-06-28: 20 day(s) match the reference only shifted by +60 min (the cache's timestamps are 60 min late)
+DEUIDXEUR 2020-06-17..2023-12-05: reference/cache close ratio 3.846 over 1214 day(s): another level or scale than the reference
+BRENTCMDUSD 2010-11-01..2024-12-31: reference/cache close ratio 100 over 4340 day(s): another level or scale than the reference
+```
+
+The exit status is:
+- `1` when any day is shifted, any day differs beyond the tolerance, or any
+  regime is other than 1.0;
+- `0` otherwise. Days present on one side only are counted, but do not fail
+  the check;
+- `2` for a usage error;
+- `130` after Ctrl-C.
+
+**Recommended practice:** after any backfill from a new source, verify the
+overlap against the source you already trust, before you rely on the new
+days. A cache holds one source per day ("first committed wins"), so fill the
+overlap into a second cache with the new source and verify that cache against
+the main one.
+
 ## Repairing a cache
 
 ### Normalizing prices into their expected band (`tradedesk-md-normalize`)
