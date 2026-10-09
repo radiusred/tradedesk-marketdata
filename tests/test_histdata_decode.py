@@ -142,6 +142,7 @@ def test_decode_reads_bid_then_ask_and_zero_volume():
         ("EURUSD", "1.103660", 11036.6),
         ("GBPJPY", "179.601000", 17960.1),
         ("XAUUSD", "2063.625000", 206362.5),
+        ("BRENTCMDUSD", "97.128000", 9712.8),  # cents, as Dukascopy stores Brent
         ("USA500IDXUSD", "4774.361000", 4774.361),
         ("DEUIDXEUR", "13174.675000", 13174.675),
     ],

@@ -201,6 +201,8 @@ def _parse_entry(where: str, symbol: str, entry: object) -> HistDataInstrument:
     evidence = entry.get("scale_evidence", "")
     if not isinstance(evidence, str):
         raise bad("scale_evidence must be text")
+    if verified and not evidence.strip():
+        raise bad("scale_verified = true needs the scale_evidence that verified it")
     spans = entry.get("exclude", [])
     if not isinstance(spans, list):
         raise bad("exclude must be a list of {from, to, reason} tables")

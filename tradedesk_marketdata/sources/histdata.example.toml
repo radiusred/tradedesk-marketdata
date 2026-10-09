@@ -13,7 +13,7 @@
 #   scale_verified = true once the scale has been confirmed against another
 #                    source's raw values for the same instrument (default false;
 #                    an export of an unverified symbol logs a warning)
-#   scale_evidence = what confirmed it (optional, text)
+#   scale_evidence = what confirmed it: required when scale_verified is true
 #   exclude        = spans whose HistData data must not be committed (optional):
 #                    [{ from = YYYY-MM-DD, to = YYYY-MM-DD, reason = "..." }, ...]
 #                    A day inside a span gets no day files and an "excluded"
@@ -27,8 +27,12 @@
 #   1      indices, in points, as quoted:  4774.361  -> 4774.361
 #
 # Names and first months were checked against histdata.com's tick-data
-# instrument list on 2026-10-08. Scales were checked against the median close of
-# Dukascopy days for the same instrument, except where scale_verified is false.
+# instrument list on 2026-10-08. An entry is verified only where the Dukascopy
+# figure that confirmed its scale is recorded in scale_evidence. The others
+# follow the convention above and were checked when the map was first written,
+# but their figures were not recorded, so they are unverified. To verify one,
+# compare a decoded HistData day with a Dukascopy-built day of the same
+# instrument and date, and record both values.
 # Not on HistData, so not mapped: EURSGD, GBPEUR, BTCUSD.
 
 
@@ -60,7 +64,7 @@ scale_evidence = "Dukascopy median close ~4782"
 name = "GRXEUR"
 scale = 1
 first_month = "2010-11"
-scale_verified = true
+scale_verified = false
 exclude = [
   { from = 2020-06-17, to = 2023-12-05, reason = "GRXEUR carries Euro Stoxx 50 levels, not the DAX" },
 ]
@@ -69,28 +73,27 @@ exclude = [
 name = "UKXGBP"
 scale = 1
 first_month = "2010-11"
-scale_verified = true
+scale_verified = false
 
 [symbols.JPNIDXJPY]
 name = "JPXJPY"
 scale = 1
 first_month = "2010-11"
-scale_verified = true
+scale_verified = false
 
 [symbols.AUSIDXAUD]
 name = "AUXAUD"
 scale = 1
 first_month = "2010-11"
-scale_verified = true
+scale_verified = false
 
-# TODO(#84): Dukascopy's raw unit for Brent is cents (9712.8 where HistData
-# decodes 97.128), so this scale is believed to be 100. No Dukascopy day
-# confirmed it when the map was written: left at 1 and unverified until #84.
+# Dukascopy's raw unit for Brent is cents: 9712.8 for HistData's 97.128.
 [symbols.BRENTCMDUSD]
 name = "BCOUSD"
-scale = 1
+scale = 100
 first_month = "2010-11"
-scale_verified = false
+scale_verified = true
+scale_evidence = "Dukascopy 2022-02-21: raw 9712.8 for 97.128"
 
 [symbols.XAUUSD]
 name = "XAUUSD"
@@ -105,49 +108,49 @@ scale_evidence = "Dukascopy median close ~151948"
 name = "AUDCAD"
 scale = 10000
 first_month = "2007-07"
-scale_verified = true
+scale_verified = false
 
 [symbols.AUDJPY]
 name = "AUDJPY"
 scale = 100
 first_month = "2002-08"
-scale_verified = true
+scale_verified = false
 
 [symbols.AUDNZD]
 name = "AUDNZD"
 scale = 10000
 first_month = "2007-09"
-scale_verified = true
+scale_verified = false
 
 [symbols.AUDUSD]
 name = "AUDUSD"
 scale = 10000
 first_month = "2000-06"
-scale_verified = true
+scale_verified = false
 
 [symbols.CHFJPY]
 name = "CHFJPY"
 scale = 100
 first_month = "2002-08"
-scale_verified = true
+scale_verified = false
 
 [symbols.EURCAD]
 name = "EURCAD"
 scale = 10000
 first_month = "2007-03"
-scale_verified = true
+scale_verified = false
 
 [symbols.EURCHF]
 name = "EURCHF"
 scale = 10000
 first_month = "2002-03"
-scale_verified = true
+scale_verified = false
 
 [symbols.EURGBP]
 name = "EURGBP"
 scale = 10000
 first_month = "2002-03"
-scale_verified = true
+scale_verified = false
 
 # Follows the 4-decimal FX convention; no Dukascopy day was available to confirm it.
 [symbols.EURSEK]
@@ -167,43 +170,43 @@ scale_evidence = "Dukascopy median close ~11217"
 name = "GBPAUD"
 scale = 10000
 first_month = "2007-09"
-scale_verified = true
+scale_verified = false
 
 [symbols.GBPCHF]
 name = "GBPCHF"
 scale = 10000
 first_month = "2002-08"
-scale_verified = true
+scale_verified = false
 
 [symbols.GBPJPY]
 name = "GBPJPY"
 scale = 100
 first_month = "2002-05"
-scale_verified = true
+scale_verified = false
 
 [symbols.GBPUSD]
 name = "GBPUSD"
 scale = 10000
 first_month = "2000-05"
-scale_verified = true
+scale_verified = false
 
 [symbols.NZDCAD]
 name = "NZDCAD"
 scale = 10000
 first_month = "2008-03"
-scale_verified = true
+scale_verified = false
 
 [symbols.USDCAD]
 name = "USDCAD"
 scale = 10000
 first_month = "2000-06"
-scale_verified = true
+scale_verified = false
 
 [symbols.USDCHF]
 name = "USDCHF"
 scale = 10000
 first_month = "2000-05"
-scale_verified = true
+scale_verified = false
 
 [symbols.USDJPY]
 name = "USDJPY"

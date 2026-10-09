@@ -60,10 +60,21 @@ def test_the_shipped_map_holds_the_25_instruments() -> None:
     )
 
 
-def test_the_shipped_map_marks_the_unconfirmed_scales_unverified() -> None:
-    unverified = {s for s, inst in hd.HISTDATA_SYMBOLS.items() if not inst.scale_verified}
-    assert unverified == {"BRENTCMDUSD", "EURSEK"}
-    assert hd.HISTDATA_SYMBOLS["BRENTCMDUSD"].scale == 1.0  # corrected by #84, not here
+def test_every_shipped_entry_carries_its_figure_or_is_unverified() -> None:
+    verified = {s: i.scale_evidence for s, i in hd.HISTDATA_SYMBOLS.items() if i.scale_verified}
+    assert verified == {
+        "USA500IDXUSD": "Dukascopy median close ~4782",
+        "BRENTCMDUSD": "Dukascopy 2022-02-21: raw 9712.8 for 97.128",
+        "XAUUSD": "Dukascopy median close ~151948",
+        "EURUSD": "Dukascopy median close ~11217",
+        "USDJPY": "Dukascopy median close ~12029",
+    }
+    assert all(not i.scale_evidence for i in hd.HISTDATA_SYMBOLS.values() if not i.scale_verified)
+
+
+def test_brent_is_scaled_into_dukascopy_cents() -> None:
+    brent = hd.HISTDATA_SYMBOLS["BRENTCMDUSD"]
+    assert (brent.name, brent.scale, brent.scale_verified) == ("BCOUSD", 100.0, True)
 
 
 def test_the_example_ships_in_the_package() -> None:
@@ -105,6 +116,10 @@ def test_a_custom_map_with_spans_loads(tmp_path) -> None:
         ),
         ('[symbols.USA500IDXUSD]\nscale = 1\nfirst_month = "2010-11"\n', "instrument code"),
         ("[symbols.USA500IDXUSD]\n" + ENTRY + 'scale_verified = "yes"\n', "true or false"),
+        (
+            "[symbols.USA500IDXUSD]\n" + ENTRY + "scale_verified = true\n",
+            "needs the scale_evidence",
+        ),
         (
             "[symbols.USA500IDXUSD]\n" + ENTRY + "exclude = [{ from = 2020-06-19, "
             'to = 2020-06-17, reason = "x" }]\n',
@@ -233,10 +248,8 @@ def jan_2015(monkeypatch):
 
 def test_an_unverified_scale_is_warned_about(jan_2015, tmp_path, caplog) -> None:
     with caplog.at_level("WARNING"):
-        _export(tmp_path / "cache", date(2015, 1, 5), date(2015, 1, 5), symbol="BRENTCMDUSD")
-    assert (
-        "BRENTCMDUSD: the symbol map's scale 1 for HistData BCOUSD is not verified" in caplog.text
-    )
+        _export(tmp_path / "cache", date(2015, 1, 5), date(2015, 1, 5), symbol="EURSEK")
+    assert "EURSEK: the symbol map's scale 10000 for HistData EURSEK is not verified" in caplog.text
 
 
 def test_a_verified_scale_is_not_warned_about(jan_2015, tmp_path, caplog) -> None:
