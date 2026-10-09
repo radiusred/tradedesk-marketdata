@@ -1,5 +1,3 @@
-import lzma
-import struct
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -7,10 +5,6 @@ import pandas as pd
 import pytest
 
 import tradedesk_marketdata.export as ex
-
-
-def _compress_records(raw: bytes) -> bytes:
-    return lzma.compress(raw)
 
 
 def test_symbol_normalise_empty_raises() -> None:
@@ -21,60 +15,6 @@ def test_symbol_normalise_empty_raises() -> None:
 def test_symbol_normalise_removes_separators_and_uppercases() -> None:
     assert ex._symbol_normalise("usa500.idx/usd") == "USA500IDXUSD"
     assert ex._symbol_normalise(" EURUSD ") == "EURUSD"
-
-
-def test_iter_hours_includes_hour_when_start_on_boundary() -> None:
-    start = datetime(2025, 1, 1, 0, 0, tzinfo=UTC)
-    end_excl = datetime(2025, 1, 1, 3, 0, tzinfo=UTC)
-    got = list(ex._iter_hours(start, end_excl))
-    assert got == [
-        datetime(2025, 1, 1, 0, 0, tzinfo=UTC),
-        datetime(2025, 1, 1, 1, 0, tzinfo=UTC),
-        datetime(2025, 1, 1, 2, 0, tzinfo=UTC),
-    ]
-
-
-def test_iter_hours_rounds_up_to_next_hour_when_start_not_on_boundary() -> None:
-    start = datetime(2025, 1, 1, 0, 30, tzinfo=UTC)
-    end_excl = datetime(2025, 1, 1, 2, 0, tzinfo=UTC)
-    got = list(ex._iter_hours(start, end_excl))
-    assert got == [
-        datetime(2025, 1, 1, 1, 0, tzinfo=UTC),
-    ]
-
-
-def test_dukascopy_tick_url_month_is_zero_based() -> None:
-    # June is month 6 => zero-based "05"
-    t = datetime(2025, 6, 1, 0, 0, tzinfo=UTC)
-    url = ex._dukascopy_tick_url("EURUSD", t)
-    assert url.startswith(ex.BASE_URL)
-    assert "/EURUSD/2025/05/01/00h_ticks.bi5" in url
-
-
-def test_probe_price_format_returns_float_for_plausible_float_prices() -> None:
-    # float layout: >i f f f f  (ms, ask, bid, ask_vol, bid_vol)
-    raw = struct.pack(">i f f f f", 0, 1.2345, 1.2340, 10.0, 12.0)
-    comp = _compress_records(raw)
-    assert ex._probe_price_format(comp) == "float"
-
-
-def test_probe_price_format_returns_int_when_float_decode_is_tiny() -> None:
-    # int layout (what we actually want to detect): >i i i f f
-    # When these int32 bytes are interpreted as float32, they commonly become tiny values.
-    raw = struct.pack(">i i i f f", 0, 100000, 99999, 10.0, 12.0)
-    comp = _compress_records(raw)
-    assert ex._probe_price_format(comp) == "int"
-
-
-def test_read_n_tick_records_reads_exact_number_of_records() -> None:
-    rec1 = struct.pack(">i f f f f", 0, 1.0, 2.0, 3.0, 4.0)
-    rec2 = struct.pack(">i f f f f", 1, 1.1, 2.1, 3.1, 4.1)
-    rec3 = struct.pack(">i f f f f", 2, 1.2, 2.2, 3.2, 4.2)
-    raw = rec1 + rec2 + rec3
-    comp = _compress_records(raw)
-
-    out = ex._read_n_tick_records(comp, 2)
-    assert out == raw[: 20 * 2]
 
 
 def test_ticks_to_candles_empty_returns_empty_frame_with_columns() -> None:

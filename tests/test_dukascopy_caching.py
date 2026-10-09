@@ -14,6 +14,7 @@ from pathlib import Path
 import pandas as pd
 
 import tradedesk_marketdata.export as ex
+import tradedesk_marketdata.sources.dukascopy as dk
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -51,13 +52,13 @@ def _patch_download_and_decode(monkeypatch, *, return_none_for_hour: datetime | 
             cache_path.write_bytes(b"fake")
         return b"fake"
 
-    monkeypatch.setattr(ex, "_download_bi5", fake_download)
-    monkeypatch.setattr(ex, "_probe_price_format", lambda *_: "float")
+    monkeypatch.setattr(dk, "_download_bi5", fake_download)
+    monkeypatch.setattr(dk, "_probe_price_format", lambda *_: "float")
 
     def fake_decode(hour_start, _comp, *, price_format, price_divisor):
         return [_make_tick(hour_start)]
 
-    monkeypatch.setattr(ex, "_decode_ticks", fake_decode)
+    monkeypatch.setattr(dk, "_decode_ticks", fake_decode)
 
 
 # ---------------------------------------------------------------------------
@@ -71,11 +72,11 @@ def test_daily_candle_csvs_written_and_bi5_deleted_after_complete_day(monkeypatc
 
     start = datetime(2025, 3, 1, 0, 0, tzinfo=UTC)
     hours = [start, start + timedelta(hours=1)]
-    monkeypatch.setattr(ex, "_iter_hours", lambda *_: iter(hours))
-    monkeypatch.setattr(ex, "DOWNLOAD_THREADS_PER_INSTRUMENT", 1)
+    monkeypatch.setattr(dk, "_iter_hours", lambda *_: iter(hours))
+    monkeypatch.setattr(dk, "DOWNLOAD_THREADS_PER_INSTRUMENT", 1)
     _patch_download_and_decode(monkeypatch)
 
-    ex.export_range(
+    dk.export_range(
         symbol="EURUSD",
         start_utc=start,
         end_utc_inclusive=start + timedelta(hours=1),
@@ -110,11 +111,11 @@ def test_daily_candle_csvs_contain_data_from_all_hours(monkeypatch, tmp_path):
 
     start = datetime(2025, 3, 1, 0, 0, tzinfo=UTC)
     hours = [start + timedelta(hours=i) for i in range(3)]
-    monkeypatch.setattr(ex, "_iter_hours", lambda *_: iter(hours))
-    monkeypatch.setattr(ex, "DOWNLOAD_THREADS_PER_INSTRUMENT", 1)
+    monkeypatch.setattr(dk, "_iter_hours", lambda *_: iter(hours))
+    monkeypatch.setattr(dk, "DOWNLOAD_THREADS_PER_INSTRUMENT", 1)
     _patch_download_and_decode(monkeypatch)
 
-    ex.export_range(
+    dk.export_range(
         symbol="EURUSD",
         start_utc=start,
         end_utc_inclusive=start + timedelta(hours=2),
@@ -145,14 +146,14 @@ def test_daily_candle_csvs_not_written_when_recent_day_has_404_hour(monkeypatch,
 
     start = datetime(2025, 3, 1, 0, 0, tzinfo=UTC)
     hours = [start, start + timedelta(hours=1)]
-    monkeypatch.setattr(ex, "_iter_hours", lambda *_: iter(hours))
-    monkeypatch.setattr(ex, "DOWNLOAD_THREADS_PER_INSTRUMENT", 1)
+    monkeypatch.setattr(dk, "_iter_hours", lambda *_: iter(hours))
+    monkeypatch.setattr(dk, "DOWNLOAD_THREADS_PER_INSTRUMENT", 1)
     # Hour 00 returns 404 (None).
     _patch_download_and_decode(monkeypatch, return_none_for_hour=start)
 
     # A very large age threshold makes the day "too young" to partial-commit,
     # so a 404 hour leaves the day uncommitted (the original retry behaviour).
-    ex.export_range(
+    dk.export_range(
         symbol="EURUSD",
         start_utc=start,
         end_utc_inclusive=start + timedelta(hours=1),
@@ -198,10 +199,10 @@ def test_early_exit_returns_existing_csvs_when_all_cached(monkeypatch, tmp_path)
         download_calls["n"] += 1
         return b"should_not_be_called"
 
-    monkeypatch.setattr(ex, "_iter_hours", lambda *_: iter(hours))
-    monkeypatch.setattr(ex, "_download_bi5", fake_download)
+    monkeypatch.setattr(dk, "_iter_hours", lambda *_: iter(hours))
+    monkeypatch.setattr(dk, "_download_bi5", fake_download)
 
-    result = ex.export_range(
+    result = dk.export_range(
         symbol="EURUSD",
         start_utc=start,
         end_utc_inclusive=start + timedelta(hours=1),
@@ -229,10 +230,10 @@ def test_early_exit_still_processes_when_only_one_output_csv_missing(monkeypatch
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "EURUSD_1MIN_bid.csv").write_text("existing")
 
-    monkeypatch.setattr(ex, "_iter_hours", lambda *_: iter(hours))
-    monkeypatch.setattr(ex, "DOWNLOAD_THREADS_PER_INSTRUMENT", 1)
+    monkeypatch.setattr(dk, "_iter_hours", lambda *_: iter(hours))
+    monkeypatch.setattr(dk, "DOWNLOAD_THREADS_PER_INSTRUMENT", 1)
 
-    bid_csv, ask_csv = ex.export_range(
+    bid_csv, ask_csv = dk.export_range(
         symbol="EURUSD",
         start_utc=start,
         end_utc_inclusive=start + timedelta(hours=1),
@@ -265,10 +266,10 @@ def test_early_exit_returns_none_tuple_when_no_resample_and_all_cached(monkeypat
         download_calls["n"] += 1
         return b"should_not_be_called"
 
-    monkeypatch.setattr(ex, "_iter_hours", lambda *_: iter(hours))
-    monkeypatch.setattr(ex, "_download_bi5", fake_download)
+    monkeypatch.setattr(dk, "_iter_hours", lambda *_: iter(hours))
+    monkeypatch.setattr(dk, "_download_bi5", fake_download)
 
-    result = ex.export_range(
+    result = dk.export_range(
         symbol="EURUSD",
         start_utc=start,
         end_utc_inclusive=start + timedelta(hours=1),
@@ -318,10 +319,10 @@ def test_reexport_self_heals_leftover_bi5_dir_for_cached_day(monkeypatch, tmp_pa
     def fake_download(*_, **__):
         raise AssertionError("re-export of a fully-cached day must not download")
 
-    monkeypatch.setattr(ex, "_iter_hours", lambda *_: iter(hours))
-    monkeypatch.setattr(ex, "_download_bi5", fake_download)
+    monkeypatch.setattr(dk, "_iter_hours", lambda *_: iter(hours))
+    monkeypatch.setattr(dk, "_download_bi5", fake_download)
 
-    ex.export_range(
+    dk.export_range(
         symbol="EURUSD",
         start_utc=start,
         end_utc_inclusive=start + timedelta(hours=1),
@@ -350,11 +351,11 @@ def test_output_csv_filenames_include_bid_and_ask_suffixes(monkeypatch, tmp_path
 
     start = datetime(2025, 3, 1, 0, 0, tzinfo=UTC)
     hours = [start, start + timedelta(hours=1)]
-    monkeypatch.setattr(ex, "_iter_hours", lambda *_: iter(hours))
-    monkeypatch.setattr(ex, "DOWNLOAD_THREADS_PER_INSTRUMENT", 1)
+    monkeypatch.setattr(dk, "_iter_hours", lambda *_: iter(hours))
+    monkeypatch.setattr(dk, "DOWNLOAD_THREADS_PER_INSTRUMENT", 1)
     _patch_download_and_decode(monkeypatch)
 
-    bid_csv, ask_csv = ex.export_range(
+    bid_csv, ask_csv = dk.export_range(
         symbol="EURUSD",
         start_utc=start,
         end_utc_inclusive=start + timedelta(hours=1),
@@ -382,11 +383,11 @@ def test_no_resample_returns_none_tuple_and_writes_no_csv(monkeypatch, tmp_path)
 
     start = datetime(2025, 3, 1, 0, 0, tzinfo=UTC)
     hours = [start, start + timedelta(hours=1)]
-    monkeypatch.setattr(ex, "_iter_hours", lambda *_: iter(hours))
-    monkeypatch.setattr(ex, "DOWNLOAD_THREADS_PER_INSTRUMENT", 1)
+    monkeypatch.setattr(dk, "_iter_hours", lambda *_: iter(hours))
+    monkeypatch.setattr(dk, "DOWNLOAD_THREADS_PER_INSTRUMENT", 1)
     _patch_download_and_decode(monkeypatch)
 
-    result = ex.export_range(
+    result = dk.export_range(
         symbol="EURUSD",
         start_utc=start,
         end_utc_inclusive=start + timedelta(hours=1),

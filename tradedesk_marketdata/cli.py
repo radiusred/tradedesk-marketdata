@@ -13,11 +13,11 @@ from .export import (
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_READ_TIMEOUT,
     DEFAULT_RETRIES,
-    export_range,
 )
 from .histdata import HISTDATA_SYMBOLS, UnmappedSymbolError
 from .histdata import lookup as histdata_lookup
 from .metadata import ExportMetadata, now_iso_utc, write_sidecar
+from .sources.dukascopy import export_range
 
 SOURCES = ("dukascopy", "histdata")
 # Flags that only mean something for the Dukascopy datafeed.

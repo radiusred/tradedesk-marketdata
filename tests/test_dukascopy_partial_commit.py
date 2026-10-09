@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 import tradedesk_marketdata.export as ex
+import tradedesk_marketdata.sources.dukascopy as dk
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -64,7 +65,7 @@ def _patch(
         if hh in gap:
             return None
         if hh in unavailable:
-            return ex.Unavailable("synthetic timeout")
+            return dk.Unavailable("synthetic timeout")
         if cache_path is not None:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_bytes(b"fake")
@@ -72,21 +73,21 @@ def _patch(
             return b""
         return b"fake"
 
-    monkeypatch.setattr(ex, "_download_bi5", fake_download)
-    monkeypatch.setattr(ex, "_probe_price_format", lambda *_: "float")
+    monkeypatch.setattr(dk, "_download_bi5", fake_download)
+    monkeypatch.setattr(dk, "_probe_price_format", lambda *_: "float")
 
     def fake_decode(hour_start, _comp, *, price_format, price_divisor):
         if hour_start.hour in dfail:
             raise ValueError("synthetic decode failure")
         return [_make_tick(hour_start)]
 
-    monkeypatch.setattr(ex, "_decode_ticks", fake_decode)
+    monkeypatch.setattr(dk, "_decode_ticks", fake_decode)
 
 
 def _run(monkeypatch, *, symbol, start, hours, **kwargs):
-    monkeypatch.setattr(ex, "_iter_hours", lambda *_: iter(hours))
-    monkeypatch.setattr(ex, "DOWNLOAD_THREADS_PER_INSTRUMENT", 1)
-    return ex.export_range(
+    monkeypatch.setattr(dk, "_iter_hours", lambda *_: iter(hours))
+    monkeypatch.setattr(dk, "DOWNLOAD_THREADS_PER_INSTRUMENT", 1)
+    return dk.export_range(
         symbol=symbol,
         start_utc=start,
         end_utc_inclusive=hours[-1],

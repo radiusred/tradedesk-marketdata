@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 import requests
 
-import tradedesk_marketdata.export as ex
+import tradedesk_marketdata.sources.dukascopy as dk
 from tradedesk_marketdata.cancel import cancellation
 
 
@@ -38,13 +38,13 @@ def test_download_bi5_ends_backoff_early_when_cancelled(monkeypatch, tmp_path: P
         def raise_for_status(self):
             raise requests.HTTPError("503")
 
-    monkeypatch.setattr(ex._SESSION, "get", lambda *_, **__: Always503())
-    monkeypatch.setattr(ex, "RETRY_BASE_DELAY", 5.0)  # a sleep the test must not sit out
+    monkeypatch.setattr(dk._SESSION, "get", lambda *_, **__: Always503())
+    monkeypatch.setattr(dk, "RETRY_BASE_DELAY", 5.0)  # a sleep the test must not sit out
 
     threading.Timer(0.1, cancellation.set).start()
     start = time.time()
     with pytest.raises(KeyboardInterrupt):
-        ex._download_bi5("http://example.com/1.bi5", tmp_path / "1.bi5", retries=3)
+        dk._download_bi5("http://example.com/1.bi5", tmp_path / "1.bi5", retries=3)
 
     assert attempts["n"] == 1  # cancelled inside the first backoff
     assert time.time() - start < 1.0
@@ -57,11 +57,11 @@ def test_download_bi5_refuses_to_start_when_cancelled(monkeypatch, tmp_path: Pat
         calls["n"] += 1
         raise AssertionError("no request should be made")
 
-    monkeypatch.setattr(ex._SESSION, "get", fake_get)
+    monkeypatch.setattr(dk._SESSION, "get", fake_get)
     cancellation.set()
 
     with pytest.raises(KeyboardInterrupt):
-        ex._download_bi5("http://example.com/1.bi5", tmp_path / "1.bi5", retries=3)
+        dk._download_bi5("http://example.com/1.bi5", tmp_path / "1.bi5", retries=3)
     assert calls["n"] == 0
 
 
@@ -75,10 +75,10 @@ def test_export_range_stops_downloading_once_cancelled(monkeypatch, tmp_path: Pa
         cancellation.set()
         return None
 
-    monkeypatch.setattr(ex, "_download_bi5", fake_download)
+    monkeypatch.setattr(dk, "_download_bi5", fake_download)
 
     with pytest.raises(KeyboardInterrupt):
-        ex.export_range(
+        dk.export_range(
             symbol="EURUSD",
             start_utc=datetime(2025, 1, 6, tzinfo=UTC),
             end_utc_inclusive=datetime(2025, 1, 12, tzinfo=UTC),  # 168 hours queued
@@ -88,4 +88,4 @@ def test_export_range_stops_downloading_once_cancelled(monkeypatch, tmp_path: Pa
         )
 
     # Only the hours already in flight when the cancel landed were fetched.
-    assert calls["n"] <= ex.DOWNLOAD_THREADS_PER_INSTRUMENT
+    assert calls["n"] <= dk.DOWNLOAD_THREADS_PER_INSTRUMENT

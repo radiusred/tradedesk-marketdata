@@ -1,90 +1,72 @@
 """
-Export Dukascopy historical data by downloading .bi5 *tick* files and resampling to candles.
+The export framework: from a source's ticks to the shared day-file cache and range CSVs.
 
-- Downloads hourly tick files:
-    https://datafeed.dukascopy.com/datafeed/{SYMBOL}/{YYYY}/{MM}/{DD}/{HH}h_ticks.bi5
-  where MM is zero-based (Jan=00..Dec=11).
+Everything here is common to every source (see :mod:`tradedesk_marketdata.source`
+for the contract and :mod:`tradedesk_marketdata.sources` for the providers):
 
-- Decompresses LZMA .bi5
-- Decodes ticks (bid/ask + volumes)
-- Resamples ticks into bid-side and ask-side OHLCV candles
-- Writes one CSV per price side for the requested date range when
-  ``resample_rule`` is provided
+- the cache layout, one 1-minute candle file per UTC day and price side::
 
-Output format:
-timestamp,open,high,low,close,volume
-(UTC, rendered as ``YYYY-MM-DD HH:MM:SS+00:00`` in the exported CSV)
+    {cache}/{SYMBOL}/{YYYY}/{MM0}/{DD}_{bid,ask}.csv.zst   (MM0: Jan=00 .. Dec=11)
 
-- Prices are floats, volumes are floats.
-- Month in URL is zero-based. See Dukascopy datafeed conventions.
+- tick to 1-minute candles, split per UTC day, and the day assembly
+- the write-time scale sentry and the atomic commit of a day's two files
+  ("first committed wins": a committed day is never rewritten by any source)
+- the per-symbol ``_sources.jsonl`` (provenance) and ``_partial_days.jsonl``
+  (known-permanent gaps) manifests
+- the fetch pool, unit ordering, progress and cancellation
+- the range CSVs, one per price side, resampled once over the whole range
 
-Examples:
-  tradedesk-md-export --symbols EURUSD \
-    --from 2025-08-01 --to 2025-12-31 \
-    --resample 5min \
-    --out out
+Output format of the range CSVs::
 
-  tradedesk-md-export --symbols USA500IDXUSD \
-    --from 2025-11-01 --to 2025-12-31 \
-    --resample 5min \
-    --out out
+    timestamp,open,high,low,close,volume
+
+with UTC timestamps rendered as ``YYYY-MM-DD HH:MM:SS+00:00``.
 """
 
 import io
 import json
 import logging
-import lzma
-import math
-import shutil
-import struct
-from collections.abc import Iterable
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
-import requests  # type: ignore[import-untyped]
 import zstandard as zstd
 from rich.progress import Progress, TaskID
 
-from .cancel import cancellation, check_cancelled
+from .cancel import check_cancelled
 from .scale_sentry import check_scale_consistency
+from .source import (
+    DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_READ_TIMEOUT,
+    DEFAULT_RETRIES,
+    RETRY_BACKOFF_FACTOR,
+    RETRY_BASE_DELAY,
+    RETRY_MAX_DELAY,
+    Commit,
+    Decision,
+    Leave,
+    RunContext,
+    Source,
+    Tick,
+    Wait,
+    ticks_frame,
+)
 
-BASE_URL = "https://datafeed.dukascopy.com/datafeed"
-UA = "tradedesk/1.0 bi5-export (https://github.com/radiusred/tradedesk-marketdata)"
-# Retry configuration
-RETRY_BASE_DELAY = 0.8  # seconds
-RETRY_MAX_DELAY = 6.0  # seconds
-RETRY_BACKOFF_FACTOR = 2.5
-# Per-request HTTP timeouts (connect, read) in seconds and attempts per hour.
-# Dukascopy's datafeed can take 20 s+ to answer a single hour under load, so
-# these are overridable from the CLI (--connect-timeout, --read-timeout, --retries).
-DEFAULT_CONNECT_TIMEOUT = 2.0
-DEFAULT_READ_TIMEOUT = 10.0
-DEFAULT_RETRIES = 3
-# Download parallelisation
-DOWNLOAD_THREADS_PER_INSTRUMENT = 2
-
-# Dukascopy .bi5 tick record layout: 20 bytes per tick (>i f f f f or >i i i f f).
-_TICK_RECORD_SIZE = 20
-# Minimum decompressed-source bi5 payload to consider non-junk; tiny non-zero
-# payloads are treated as "no data" for the hour.
-_MIN_PAYLOAD_BYTES = 64
-
-_SESSION = requests.Session()
-_SESSION.headers.update({"User-Agent": UA})
+__all__ = [
+    "DEFAULT_CONNECT_TIMEOUT",
+    "DEFAULT_READ_TIMEOUT",
+    "DEFAULT_RETRIES",
+    "RETRY_BACKOFF_FACTOR",
+    "RETRY_BASE_DELAY",
+    "RETRY_MAX_DELAY",
+    "Tick",
+    "export_range",
+]
 
 log = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class Tick:
-    ts: datetime
-    bid: float
-    ask: float
-    bid_vol: float
-    ask_vol: float
 
 
 def _symbol_normalise(s: str) -> str:
@@ -95,7 +77,7 @@ def _symbol_normalise(s: str) -> str:
       - USA500.IDX/USD
       - GBR.IDX/GBP
       - usa500idxusd
-    Convert to Dukascopy datafeed folder naming, typically uppercase alnum only.
+    Convert to the cache's symbol naming: uppercase, alphanumerics only.
     """
     raw = s.strip()
     if not raw:
@@ -103,246 +85,37 @@ def _symbol_normalise(s: str) -> str:
 
     # Remove separators
     cleaned = "".join(ch for ch in raw if ch.isalnum())
-    # Datafeed folders are typically uppercase
     return cleaned.upper()
 
 
-def _iter_hours(start: datetime, end_exclusive: datetime) -> Iterable[datetime]:
-    """
-    Yield hour starts [start, end_exclusive) at hourly granularity, UTC.
-    """
-    cur = start.replace(minute=0, second=0, microsecond=0)
-    if cur < start:
-        cur += timedelta(hours=1)
-    while cur < end_exclusive:
-        yield cur
-        cur += timedelta(hours=1)
-
-
-def _dukascopy_tick_url(symbol: str, hour_start: datetime) -> str:
-    """
-    Dukascopy uses zero-based months in the URL: Jan=00 ... Dec=11
-    """
-    y = hour_start.year
-    m0 = hour_start.month - 1
-    d = hour_start.day
-    h = hour_start.hour
-    return f"{BASE_URL}/{symbol}/{y}/{m0:02d}/{d:02d}/{h:02d}h_ticks.bi5"
-
-
-@dataclass(frozen=True)
-class Unavailable:
-    """An hour that could not be fetched in this run.
-
-    Returned by ``_download_bi5`` when every attempt ended in a timeout, a
-    connection error or a non-404 HTTP status (429, 5xx). It is not a 404: the
-    datafeed may well hold the hour, so its day is left uncommitted and the
-    next run retries it. Conflating the two was how a rate-limited run came to
-    partial-commit days with 21 of 24 hours recorded as permanent gaps.
-    """
-
-    error: str
-
-
-def _download_bi5(
-    url: str,
-    cache_path: Path | None,
-    timeout: tuple[float, float] = (DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT),
-    retries: int = DEFAULT_RETRIES,
-) -> bytes | None | Unavailable:
-    """
-    Returns compressed bytes.
-
-    - None means "no file" (HTTP 404).
-    - Unavailable means every attempt failed for another reason; retry next run.
-    - b"" means "valid but empty" (HTTP 200 with zero-length body): no tick data for that hour.
-
-    We cache empty payloads as empty files so repeated exports do not re-download them.
-
-    Uses exponential backoff on retries: 0.5s, 1.0s, 2.0s, 4.0s (capped).
-
-    Raises KeyboardInterrupt as soon as a cancel is pending: before each attempt
-    and from inside a backoff sleep, so a cancelled export never starts another
-    request or sits out a backoff.
-    """
-    # If cached, return it even if it's 0 bytes (0 bytes means "no ticks for this hour")
-    if cache_path is not None and cache_path.exists():
-        return cache_path.read_bytes()
-
-    last_exc: Exception | None = None
-    delay = RETRY_BASE_DELAY
-
-    for attempt in range(1, retries + 1):
-        check_cancelled()
-        try:
-            with _SESSION.get(url, timeout=timeout) as r:
-                if r.status_code == 404:
-                    log.info("no tick data found (HTTP 404): %s", url)
-                    return None
-                r.raise_for_status()
-                data: bytes = bytes(r.content)
-
-            # HTTP 200 with empty body is valid: "no ticks this hour"
-            if len(data) == 0:
-                if cache_path is not None:
-                    cache_path.parent.mkdir(parents=True, exist_ok=True)
-                    cache_path.touch(exist_ok=True)  # cache the "empty hour"
-                return b""
-
-            # Tiny non-zero payloads are usually junk/edge; keep existing behavior.
-            if len(data) < _MIN_PAYLOAD_BYTES:
-                log.debug("tiny bi5 payload (%d bytes) for %s; treating as no data", len(data), url)
-                if cache_path is not None:
-                    cache_path.parent.mkdir(parents=True, exist_ok=True)
-                    cache_path.touch(exist_ok=True)
-                return b""
-
-            if cache_path is not None:
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
-                tmp.write_bytes(data)
-                tmp.replace(cache_path)
-
-            return data
-
-        except Exception as e:
-            last_exc = e
-            log.debug("download attempt %d/%d failed for %s: %s", attempt, retries, url, e)
-
-            # Backoff before retry (but not after final attempt); a cancel ends the sleep early
-            if attempt < retries:
-                if cancellation.wait(delay):
-                    raise KeyboardInterrupt() from None
-                delay = min(delay * RETRY_BACKOFF_FACTOR, RETRY_MAX_DELAY)
-
-    log.warning("skipping %s this run after %d failed attempts (%s)", url, retries, last_exc)
-    return Unavailable(str(last_exc))
-
-
-def _probe_price_format(compressed: bytes) -> str:
-    """
-    Read only the first 20-byte tick record via streaming LZMA and decide whether
-    bid/ask are float32 or int32.
-
-    Heuristic:
-      - interpret ask/bid as float32: if non-finite OR absurdly small (subnormal/near-zero)
-        then treat as int32.
-    """
-    try:
-        with lzma.open(io.BytesIO(compressed), "rb") as f:
-            first = f.read(_TICK_RECORD_SIZE)
-
-        if len(first) < _TICK_RECORD_SIZE:
-            raise ValueError("bi5 too short to probe")
-
-    except EOFError as e:
-        raise ValueError("Not enough decompressed bytes to probe tick format") from e
-
-    # float layout: >i f f f f
-    ms, ask_f, bid_f, ask_v, bid_v = struct.unpack(">i f f f f", first)
-
-    if (not math.isfinite(ask_f)) or (not math.isfinite(bid_f)):
-        return "int"
-
-    # Float mis-decode often yields tiny denormals ~1e-38 for indices.
-    if abs(ask_f) < 1e-6 and abs(bid_f) < 1e-6:
-        return "int"
-
-    return "float"
-
-
-def _read_n_tick_records(compressed: bytes, n: int) -> bytes:
-    # Stream-decompress just enough to read n tick records.
-    need = _TICK_RECORD_SIZE * n
-    with lzma.open(io.BytesIO(compressed), "rb") as f:
-        return f.read(need)
-
-
-def _decode_ticks(
-    hour_start: datetime, compressed: bytes, *, price_format: str, price_divisor: float
-) -> list[Tick]:
-    """
-    Decode a .bi5 tick file.
-
-    Layout per tick row (20 bytes):
-      int32  ms_since_hour_start
-      float32 ask
-      float32 bid
-      float32 ask_volume
-      float32 bid_volume
-
-    Endianness: big-endian is commonly used in bi5 decoders.
-    """
-    raw = lzma.decompress(compressed)
-    if len(raw) % _TICK_RECORD_SIZE != 0:
-        raise ValueError(
-            f"Unexpected bi5 payload length: {len(raw)} (not multiple of {_TICK_RECORD_SIZE})"
-        )
-
-    ticks: list[Tick] = []
-
-    if price_format == "float":
-        unpack = struct.Struct(">i f f f f").unpack_from
-        for i in range(0, len(raw), _TICK_RECORD_SIZE):
-            ms, ask, bid, ask_vol, bid_vol = unpack(raw, i)
-            ts = hour_start + timedelta(milliseconds=int(ms))
-            ticks.append(
-                Tick(
-                    ts=ts,
-                    bid=float(bid),
-                    ask=float(ask),
-                    bid_vol=float(bid_vol),
-                    ask_vol=float(ask_vol),
-                )
-            )
-        return ticks
-
-    if price_format == "int":
-        div = float(price_divisor or 1.0)
-        unpack = struct.Struct(">i i i f f").unpack_from  # ask,bid as int32
-        for i in range(0, len(raw), _TICK_RECORD_SIZE):
-            ms, ask_i, bid_i, ask_vol, bid_vol = unpack(raw, i)
-            ts = hour_start + timedelta(milliseconds=int(ms))
-            ticks.append(
-                Tick(
-                    ts=ts,
-                    bid=float(bid_i) / div,
-                    ask=float(ask_i) / div,
-                    bid_vol=float(bid_vol),
-                    ask_vol=float(ask_vol),
-                )
-            )
-        return ticks
-
-    raise ValueError("price_format must be 'float' or 'int'")
-
-
 def _ticks_to_candles(
-    ticks: list[Tick],
+    ticks: pd.DataFrame | Sequence[Tick],
     *,
     resample_rule: str,
     price_side: str = "bid",
 ) -> pd.DataFrame:
     """
     Resample ticks to OHLCV using a pandas resample rule (e.g. '1min', '5min', '15min', '1H').
-    Volume uses bid_vol (for bid) or ask_vol (for ask); if mid, uses (bid_vol+ask_vol)/2.
+
+    ``ticks`` is a tick frame (see :mod:`tradedesk_marketdata.source`) or a
+    sequence of :class:`Tick`. Volume uses bid_vol (for bid) or ask_vol (for
+    ask); if mid, uses (bid_vol+ask_vol)/2.
     """
-    if not ticks:
+    if len(ticks) == 0:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
 
-    idx = pd.DatetimeIndex([t.ts for t in ticks], tz="UTC")
+    frame = ticks if isinstance(ticks, pd.DataFrame) else ticks_frame(ticks)
     resample_rule = resample_rule.strip().lower()
 
     if price_side == "bid":
-        px = pd.Series([t.bid for t in ticks], index=idx)
-        vol = pd.Series([t.bid_vol for t in ticks], index=idx)
+        px = frame["bid"]
+        vol = frame["bid_vol"]
     elif price_side == "ask":
-        px = pd.Series([t.ask for t in ticks], index=idx)
-        vol = pd.Series([t.ask_vol for t in ticks], index=idx)
+        px = frame["ask"]
+        vol = frame["ask_vol"]
     elif price_side == "mid":
-        px = pd.Series([(t.bid + t.ask) / 2.0 for t in ticks], index=idx)
-        vol = pd.Series([(t.bid_vol + t.ask_vol) / 2.0 for t in ticks], index=idx)
-
+        px = (frame["bid"] + frame["ask"]) / 2.0
+        vol = (frame["bid_vol"] + frame["ask_vol"]) / 2.0
     else:
         raise ValueError("price_side must be one of: bid, ask, mid")
 
@@ -355,79 +128,25 @@ def _ticks_to_candles(
     return out
 
 
-def _probe(
-    symbol: str,
-    hours: list[datetime],
-    cache_dir: Path | None,
-    probe_ticks: int,
-    price_divisor: float | None,
-    timeout: tuple[float, float] = (DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT),
-    retries: int = DEFAULT_RETRIES,
-) -> None:
-    for hour in hours:
-        url = _dukascopy_tick_url(symbol, hour)
-        cache_path = None
-        if cache_dir is not None:
-            cache_path = (
-                cache_dir
-                / symbol
-                / f"{hour.year}"
-                / f"{hour.month - 1:02d}"
-                / f"{hour.day:02d}"
-                / f"{hour.hour:02d}h_ticks.bi5"
-            )
-
-        comp = _download_bi5(url, cache_path=cache_path, timeout=timeout, retries=retries)
-
-        if isinstance(comp, Unavailable):
-            print(f"{symbol}: could not fetch probe hour {hour.isoformat()}: {comp.error}")
-            continue
-        if comp is None or len(comp) == 0:
-            print(f"{symbol}: no data for probe hour {hour.isoformat()}")
-            continue
-
-        detected_format = _probe_price_format(comp)
-        print(f"{symbol}: detected tick price format = {detected_format}")
-        raw20 = _read_n_tick_records(comp, max(1, probe_ticks))
-
-        if len(raw20) < _TICK_RECORD_SIZE:
-            print(f"{symbol}: probe failed (not enough decompressed bytes)")
-            continue
-
-        if detected_format == "float":
-            unpack = struct.Struct(">i f f f f").unpack_from
-            print(f"{symbol} @ {hour.isoformat()} (float): first {probe_ticks} ticks")
-            for i in range(0, min(len(raw20), _TICK_RECORD_SIZE * probe_ticks), _TICK_RECORD_SIZE):
-                ms, ask, bid, ask_vol, bid_vol = unpack(raw20, i)
-                ts = hour + timedelta(milliseconds=int(ms))
-                print(ts.isoformat(), "bid", bid, "ask", ask, "bid_vol", bid_vol)
-        else:
-            unpack = struct.Struct(">i i i f f").unpack_from
-            print(f"{symbol} @ {hour.isoformat()} (int): first {probe_ticks} ticks")
-            divisors = [1, 10, 100, 1000, 10000, 100000]
-            rows = []
-            for i in range(0, min(len(raw20), _TICK_RECORD_SIZE * probe_ticks), _TICK_RECORD_SIZE):
-                ms, ask_i, bid_i, ask_vol, bid_vol = unpack(raw20, i)
-                ts = hour + timedelta(milliseconds=int(ms))
-                rows.append((ts, bid_i, ask_i, bid_vol))
-            ts0, bid0, ask0, vol0 = rows[0]
-            print("first tick raw:", ts0.isoformat(), "bid_i", bid0, "ask_i", ask0, "vol", vol0)
-            for divisor in divisors:
-                print(f"  divisor {divisor:>6}: bid {bid0 / divisor:.6f} ask {ask0 / divisor:.6f}")
-
-            price_div: float = price_divisor or 1.0
-            print(f"using --price-divisor {price_div}:")
-            for ts, bid_i, ask_i, bid_vol in rows:
-                print(
-                    ts.isoformat(),
-                    "bid",
-                    bid_i / price_div,
-                    "ask",
-                    ask_i / price_div,
-                    "bid_vol",
-                    bid_vol,
-                )
-        return None
+def _split_days(ticks: pd.DataFrame) -> Iterator[tuple[date, pd.DataFrame]]:
+    """A tick frame's ticks per UTC day, in day order, each day's ticks in their original order."""
+    idx = pd.DatetimeIndex(ticks.index)
+    first, last = idx.min(), idx.max()
+    if first.normalize() == last.normalize():
+        yield first.date(), ticks
+        return
+    if idx.is_monotonic_increasing:
+        day = first.normalize()
+        while day <= last:
+            nxt = day + pd.Timedelta(days=1)
+            lo, hi = idx.searchsorted([day, nxt])
+            if hi > lo:
+                yield day.date(), ticks.iloc[lo:hi]
+            day = nxt
+        return
+    days = idx.normalize()
+    for d in days.unique().sort_values():
+        yield d.date(), ticks[days == d]
 
 
 def _daily_candle_path(cache_dir: Path, symbol: str, day: date, side: str) -> Path:
@@ -451,106 +170,6 @@ def _parse_cache_day(year_name: str, month0_name: str, day_name: str) -> date | 
         return date(int(year_name), int(month0_name) + 1, int(day_name))
     except ValueError:
         return None
-
-
-def _cleanup_stale_day_dirs(
-    cache_dir: Path,
-    symbol: str,
-    *,
-    today: date | None = None,
-    commit_partial_after_days: int = 7,
-) -> None:
-    """Remove leftover ``.bi5`` day directories that are redundant or empty.
-
-    A day directory (``{symbol}/YYYY/MM/DD/``) holds the raw hourly ``.bi5``
-    tick files for one day. Those files are redundant once that day's two
-    daily-candle CSVs (``DD_bid.csv.zst`` and ``DD_ask.csv.zst``, written as
-    siblings in the month directory) exist. We remove a day directory when:
-
-      - it is **empty** (the normal post-flush state where every ``.bi5`` was
-        already deleted but the ``rmdir`` never ran),
-      - it is **non-empty but both candle CSVs for that day already exist**, or
-      - **every staged ``.bi5`` is 0 bytes** (a market-closed / no-tick day) and
-        the day is older than ``commit_partial_after_days``.
-
-    The second case self-heals a run that wrote the candle CSVs but was
-    interrupted before deleting (all of) its ``.bi5``. Without this, the day is
-    permanently stuck: ``export_range`` marks it fully-cached and skips
-    download/decode, so the leftover ``.bi5`` are never cleaned, and the
-    consumer's ``_check_old_format`` guard hard-fails any backtest touching the
-    day. Re-running the export now repairs it (matching the documented
-    "re-run tradedesk-md-export" remediation). The raw ``.bi5`` are losslessly
-    reproducible, so removing them once candles exist is safe.
-
-    The third case covers weekend / market-holiday days where every
-    fetched hour returned no ticks: each ``.bi5`` is written as a 0-byte file, so
-    the day decodes to nothing and **no** candle CSV is ever produced — yet the
-    staging dir lingers and trips ``_check_old_format`` on every backtest
-    touching the day. The 0-byte ``.bi5`` carry no recoverable data and are
-    losslessly reproducible, and leaving the dir makes ``export_range`` treat the
-    day as cached and skip the re-download that would refill it, so removal is
-    strictly safe. It is age-gated like a partial commit so a same-day in-flight
-    export (early empty hours staged before ticks arrive) is left alone.
-
-    Day directories with leftover **non-empty** ``.bi5`` but no complete candle
-    pair are left untouched so a subsequent run can still finish committing the
-    day.
-    """
-    if today is None:
-        today = datetime.now(UTC).date()
-    sym_dir = cache_dir / symbol
-    if not sym_dir.is_dir():
-        return
-    for year_dir in sym_dir.iterdir():
-        if not year_dir.is_dir():
-            continue
-        for month_dir in year_dir.iterdir():
-            if not month_dir.is_dir():
-                continue
-            for day_dir in month_dir.iterdir():
-                if not day_dir.is_dir():
-                    continue
-                day_files = list(day_dir.iterdir())
-                if not day_files:
-                    try:
-                        day_dir.rmdir()
-                    except OSError:
-                        pass
-                    continue
-                # Non-empty: remove if both daily-candle CSVs exist, in which
-                # case the leftover .bi5 are redundant and removable.
-                bid_csv = month_dir / f"{day_dir.name}_bid.csv.zst"
-                ask_csv = month_dir / f"{day_dir.name}_ask.csv.zst"
-                if bid_csv.exists() and ask_csv.exists():
-                    try:
-                        shutil.rmtree(day_dir)
-                    except OSError:
-                        log.warning(
-                            "%s: could not remove redundant bi5 day-dir %s", symbol, day_dir
-                        )
-                    continue
-                # All-empty .bi5 staging: no decodable ticks, so the
-                # day will never produce a candle. Remove once aged past the
-                # partial-commit window so a same-day export is not disturbed.
-                bi5_files = [f for f in day_files if f.suffix == ".bi5"]
-                if (
-                    bi5_files
-                    and len(bi5_files) == len(day_files)
-                    and all(f.stat().st_size == 0 for f in bi5_files)
-                ):
-                    day = _parse_cache_day(year_dir.name, month_dir.name, day_dir.name)
-                    if day is None or (today - day).days >= commit_partial_after_days:
-                        try:
-                            shutil.rmtree(day_dir)
-                        except OSError:
-                            log.warning(
-                                "%s: could not remove empty-bi5 day-dir %s", symbol, day_dir
-                            )
-
-
-# Backwards-compatible alias: this function historically only pruned empty
-# directories; it now also self-heals redundant non-empty ones.
-_cleanup_empty_day_dirs = _cleanup_stale_day_dirs
 
 
 def _candles_to_candles(df: pd.DataFrame, resample_rule: str) -> pd.DataFrame:
@@ -585,10 +204,10 @@ def _write_daily_candles(df: pd.DataFrame, path: Path) -> None:
 # Day assembly and commit, shared by every source
 # ---------------------------------------------------------------------------
 #
-# A source turns its raw units (Dukascopy hours, HistData months) into 1-minute
-# bid/ask candle frames per UTC day; from there on every source goes through the
-# same steps: assemble the day, run the scale sentry, write both day files
-# atomically, and record which source produced the day.
+# A source turns its raw units into ticks; the framework turns those into
+# 1-minute bid/ask candle frames per UTC day and, for each day the source lets
+# it commit, assembles the day, runs the scale sentry, writes both day files
+# atomically, and records which source produced the day.
 
 
 def _day_is_committed(cache_dir: Path, symbol: str, day: date) -> bool:
@@ -744,8 +363,8 @@ def _append_partial_day_manifest(
     """Record a partial-day commit in the per-symbol manifest.
 
     A *partial day* is one that was committed to daily candle CSVs despite
-    holding one or more permanently-absent hours (404 / decode-failure that
-    never resolved). The manifest makes "known-permanent gap, not a bug"
+    holding one or more permanently-absent hours (the source's gap rule says
+    they will not appear). The manifest makes "known-permanent gap, not a bug"
     machine-readable for downstream data-quality checks without changing the
     candle-CSV schema. One JSON object per line, append-only; safe because a
     given symbol is exported by a single worker thread.
@@ -775,156 +394,78 @@ def _load_daily_candles(path: Path) -> pd.DataFrame | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# The export driver
+# ---------------------------------------------------------------------------
+
+
 def export_range(
     *,
+    source: Source,
     symbol: str,
     start_utc: datetime,
     end_utc_inclusive: datetime,
     out: Path,
-    price_divisor: float = 1.0,
     resample_rule: str | None,
     cache_dir: Path | None,
-    probe: bool = False,
-    probe_ticks: int = 10,
     commit_partial_after_days: int = 7,
     progress: "Progress | None" = None,
     timeout: tuple[float, float] = (DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT),
     retries: int = DEFAULT_RETRIES,
 ) -> tuple[Path | None, Path | None]:
-    """
-    Export [start_utc, end_utc_inclusive] into two CSVs: one for bid prices, one for ask.
-    Returns (bid_csv, ask_csv); either may be None if no data or resample_rule is None.
+    """Export the UTC days of [start_utc, end_utc_inclusive] of one symbol from ``source``.
 
-    If progress is provided, we create three tasks per symbol:
-      - dl: download attempts
-      - rs: processing/resampling progress (advances once per hour processed)
-      - write: advances once per output file written (max 2)
+    Returns the (bid, ask) range CSVs; both are None when ``resample_rule`` is
+    None, and either may be None when its side produced no data.
 
-    Caching strategy (when cache_dir is set):
-      - .bi5 tick files are downloaded and cached as before.
-      - After all hours of a day decode successfully, two daily 1-min candle
-        CSV files are written ({day}_bid.csv.zst, {day}_ask.csv.zst) and the
-        .bi5 files for that day are deleted.
-      - On subsequent runs, days with both candle CSVs present skip .bi5
-        download/decode entirely and load candles directly from the CSVs.
-      - A day is only committed to candle CSVs when every hour has a
-        definitive result (successfully decoded or legitimate empty-200). Hours
-        with 404 or decode failures leave the day uncommitted so the next run
-        can retry — UNLESS the day is older than ``commit_partial_after_days``,
-        in which case the gap is treated as permanent (Dukascopy historical
-        ticks are immutable and published with <1-day lag) and the day is
-        *partial-committed*: candle CSVs are written from the hours that did
-        decode, the bi5 are deleted, and the day is recorded in the per-symbol
-        ``_partial_days.jsonl`` manifest. Days rejected by the scale-sentry are
-        never partial-committed (a wrong-scale day must be re-run with the
-        correct ``--price-divisor``, not committed).
-      - Every committed day is recorded in the per-symbol ``_sources.jsonl``
-        provenance manifest (source ``dukascopy``, the scale factor applied
-        and the day's hour set).
+    With a ``cache_dir``:
 
-    commit_partial_after_days:
-        Age threshold (in days, UTC) past which a permanent-gap day (404 /
-        decode-failure hours) is committed from its available hours instead of
-        being left for retry. Default 7. ``0`` commits any permanent-gap day
-        immediately (used by the orphan-cache backfill sweep).
+    - a day that already has both candle files is never fetched or rewritten,
+      whichever source wrote it (first committed wins); when every day is
+      committed and the range CSVs exist, nothing is done at all
+    - every other day is built from the source's units and committed once the
+      source decides it may be (its gap rules); a day the scale sentry refuses
+      is not written
+    - every committed day is recorded in ``_sources.jsonl`` with the source's
+      name, scale factor and unit(s), and a partial day in
+      ``_partial_days.jsonl``
+
+    With progress, four tasks per symbol: ``dl`` (units fetched), ``rs``
+    (units processed) and ``write`` (range CSVs) when resampling, and
+    ``cache`` (days decided) when caching.
 
     timeout, retries:
         The per-request ``(connect, read)`` timeout in seconds and the number of
-        attempts per hour, applied to every datafeed request this export makes
-        (probe, download, and the re-download after a decode failure).
+        attempts per fetch unit, applied to every request the source makes.
     """
-
-    # counters
-    hours_total = 0
-    hours_missing_404 = 0
-    hours_unavailable = 0
-    hours_empty_200 = 0
-    hours_downloaded = 0
-    hours_decode_failed = 0
-    hours_resampled_nonempty = 0
-    hours_loaded_from_cache = 0
-    days_rejected_scale_sentry = 0
-    days_committed_partial = 0
-
-    today_utc = datetime.now(UTC).date()
-
-    detected_format: str | None = None
     symbol = _symbol_normalise(symbol)
-
-    # End-exclusive boundary for hour iteration
-    end_exclusive = (end_utc_inclusive + timedelta(days=1)).replace(
-        hour=0, minute=0, second=0, microsecond=0
+    source.check_symbol(symbol)  # a symbol the source cannot serve is refused first
+    ctx = RunContext(
+        source_name=source.name,
+        symbol=symbol,
+        start_utc=start_utc,
+        end_utc_inclusive=end_utc_inclusive,
+        cache_dir=cache_dir,
+        commit_partial_after_days=commit_partial_after_days,
+        timeout=timeout,
+        retries=retries,
     )
 
-    # Accumulates 1-minute candle frames (bid and ask) across all hours.
-    # At the end these are each aggregated once to the target resample_rule.
-    all_1min_bid_frames: list[pd.DataFrame] = []
-    all_1min_ask_frames: list[pd.DataFrame] = []
+    days: list[date] = []
+    d = start_utc.date()
+    while d <= end_utc_inclusive.date():
+        days.append(d)
+        d += timedelta(days=1)
+    already = {d for d in days if cache_dir is not None and _day_is_committed(cache_dir, symbol, d)}
+    pending = [d for d in days if d not in already]
 
-    # Per-day 1-min candle frame lists — used for writing daily candle cache files.
-    day_bid_frames: dict[date, list[pd.DataFrame]] = {}
-    day_ask_frames: dict[date, list[pd.DataFrame]] = {}
+    run = source.open(ctx)
 
-    # Days with >=1 permanent-gap hour (404 / decode failure). These are not
-    # written to daily CSVs until they age past commit_partial_after_days, at
-    # which point the gap is treated as permanent and the day is partial-committed.
-    day_perm_gap: set[date] = set()
-    # Days with an hour this run could not fetch: never committed, retried next run.
-    day_unavailable: set[date] = set()
-    # Days rejected by the scale-sentry (price-scale divergence). These must
-    # NEVER be partial-committed — they need a re-run with the correct
-    # --price-divisor, not commitment. Scale-rejection dominates a gap.
-    day_scale_rejected: set[date] = set()
-    # Permanent-gap hours per day (for the partial-day manifest).
-    day_missing_hours: dict[date, set[int]] = {}
-    # Gap reason(s) per day: "missing_404" and/or "decode_failed".
-    day_gap_reasons: dict[date, set[str]] = {}
-
-    # Collect all hours to download
-    hours_to_fetch = list(_iter_hours(start_utc, end_exclusive))
-    hours_total = len(hours_to_fetch)
-
-    # Probe mode: check only first 24 hours, probe the first that works, and exit immediately
-    if probe:
-        log.info(f"Running probe for {symbol} starting at {start_utc.isoformat()}")
-        _probe(
-            symbol,
-            hours_to_fetch[0:24],
-            cache_dir,
-            probe_ticks,
-            price_divisor,
-            timeout=timeout,
-            retries=retries,
-        )
-        return (None, None)
-
-    # Pre-check: identify days where daily 1-min candle CSVs already exist.
-    # Those days skip .bi5 download and decode entirely.
-    # Prune leftover bi5 day-dirs (empty, or redundant where candle CSVs exist)
-    # so a re-export self-heals dirs interrupted mid-deletion.
-    days_fully_cached: set[date] = set()
-    unique_days: set[date] = set()
-    if cache_dir is not None:
-        unique_days = {h.date() for h in hours_to_fetch}
-        for day in unique_days:
-            bid_path = _daily_candle_path(cache_dir, symbol, day, "bid")
-            ask_path = _daily_candle_path(cache_dir, symbol, day, "ask")
-            if bid_path.exists() and ask_path.exists():
-                days_fully_cached.add(day)
-        _cleanup_stale_day_dirs(
-            cache_dir,
-            symbol,
-            today=today_utc,
-            commit_partial_after_days=commit_partial_after_days,
-        )
-
-    # Early exit: if every day is cached there may be nothing to (re)generate.
-    if cache_dir is not None and unique_days and days_fully_cached == unique_days:
+    # Early exit: every day is cached, and there is nothing (more) to write.
+    if cache_dir is not None and days and not pending:
         if resample_rule is None:
-            # No output is ever written without a resample rule; cache is complete.
             log.info(
-                f"{symbol}: all {len(unique_days)} days "
-                "cached and no resample requested; nothing to do"
+                f"{symbol}: all {len(days)} days cached and no resample requested; nothing to do"
             )
             return (None, None)
         rule_label = resample_rule.replace(" ", "").upper()
@@ -932,465 +473,222 @@ def export_range(
         ask_csv = out / f"{symbol}_{rule_label}_ask.csv"
         if bid_csv.exists() and ask_csv.exists():
             log.info(
-                f"{symbol}: all {len(unique_days)} days "
-                "cached and output CSVs exist; skipping export"
+                f"{symbol}: all {len(days)} days cached and output CSVs exist; skipping export"
             )
             return (bid_csv, ask_csv)
 
-    # Create progress tasks if Progress object provided.
-    dl_task_id = None
-    rs_task_id = None
-    write_task_id = None
-    cache_task_id = None
+    units = list(run.plan(pending))
+
+    dl_task: TaskID | None = None
+    rs_task: TaskID | None = None
+    write_task: TaskID | None = None
+    cache_task: TaskID | None = None
     if progress is not None:
-        dl_task_id = progress.add_task(
-            f"[cyan]{symbol}[/] dl",
-            total=hours_total,
-            symbol=symbol,
-            phase="dl",
+        dl_task = progress.add_task(
+            f"[cyan]{symbol}[/] dl", total=len(units), symbol=symbol, phase="dl"
         )
         if resample_rule is not None:
-            rs_task_id = progress.add_task(
-                f"[cyan]{symbol}[/] rs",
-                total=hours_total,
-                symbol=symbol,
-                phase="rs",
+            rs_task = progress.add_task(
+                f"[cyan]{symbol}[/] rs", total=len(units), symbol=symbol, phase="rs"
             )
-            write_task_id = progress.add_task(
-                f"[cyan]{symbol}[/] write",
-                total=2,
-                symbol=symbol,
-                phase="write",
+            write_task = progress.add_task(
+                f"[cyan]{symbol}[/] write", total=2, symbol=symbol, phase="write"
             )
-        n_days_to_write = len(unique_days - days_fully_cached)
-        if cache_dir is not None and n_days_to_write > 0:
-            cache_task_id = progress.add_task(
-                f"[cyan]{symbol}[/] cache",
-                total=n_days_to_write,
-                symbol=symbol,
-                phase="cache",
+        if cache_dir is not None and pending:
+            cache_task = progress.add_task(
+                f"[cyan]{symbol}[/] cache", total=len(pending), symbol=symbol, phase="cache"
             )
 
-    hours_to_download = [h for h in hours_to_fetch if h.date() not in days_fully_cached]
+    def advance(task: TaskID | None) -> None:
+        if progress is not None and task is not None:
+            progress.update(task, advance=1)
 
-    # last_hour_of_day[d] is the latest hour in hours_to_fetch for date d.
-    # Used to detect when a day's processing is complete.
-    last_hour_of_day: dict[date, datetime] = {h.date(): h for h in hours_to_fetch}
-
-    # Sentinel value stored in hour_data for hours belonging to fully-cached days.
-    _DAY_CACHED = object()
-
-    # Normal mode: parallel download
-    log.info(f"Exporting {symbol} from {start_utc.isoformat()} to {end_utc_inclusive.isoformat()}")
-    log.info(
-        f"{symbol}: fetching {len(hours_to_download)} hours "
-        f"({len(days_fully_cached)} days loaded from cache) "
-        f"with {DOWNLOAD_THREADS_PER_INSTRUMENT} threads"
+    # --- per-run state ---
+    pending_set = set(pending)
+    all_bid: list[pd.DataFrame] = []
+    all_ask: list[pd.DataFrame] = []
+    day_bid: dict[date, list[pd.DataFrame]] = {}
+    day_ask: dict[date, list[pd.DataFrame]] = {}
+    days_with_data: set[date] = set()
+    # Units still to be processed per pending day; a day is decided at zero.
+    remaining: dict[date, int] = dict.fromkeys(pending, 0)
+    for unit in units:
+        for ud in unit.days:
+            if ud in remaining:
+                remaining[ud] += 1
+    waiting: dict[date, Wait] = {}
+    counts = dict.fromkeys(
+        (
+            "committed",
+            "committed_empty",
+            "committed_partial",
+            "rejected_scale_sentry",
+            "left_uncommitted",
+        ),
+        0,
     )
 
-    # Pre-populate hour_data for cached days and advance dl progress immediately.
-    hour_data: dict[datetime, object] = {}
-    for h in hours_to_fetch:
-        if h.date() in days_fully_cached:
-            hour_data[h] = _DAY_CACHED
-    if days_fully_cached and progress is not None and dl_task_id is not None:
-        n_cached_hours = sum(1 for h in hours_to_fetch if h.date() in days_fully_cached)
-        progress.update(dl_task_id, advance=n_cached_hours)
-
-    # Download hours in parallel
-    def download_hour(hour_start: datetime) -> tuple[datetime, bytes | None | Unavailable]:
-        """Download a single hour's tick data."""
-        try:
-            check_cancelled()
-            url = _dukascopy_tick_url(symbol, hour_start)
-            cache_path = None
-            if cache_dir is not None:
-                cache_path = (
-                    cache_dir
-                    / symbol
-                    / f"{hour_start.year}"
-                    / f"{hour_start.month - 1:02d}"
-                    / f"{hour_start.day:02d}"
-                    / f"{hour_start.hour:02d}h_ticks.bi5"
-                )
-
-            comp = _download_bi5(url, cache_path=cache_path, timeout=timeout, retries=retries)
-
-            if progress is not None and dl_task_id is not None:
-                progress.update(dl_task_id, advance=1)
-
-            return (hour_start, comp)
-
-        except KeyboardInterrupt:
-            raise
-        except Exception as e:
-            log.debug(f"Download failed for {hour_start}: {e}")
-            return (hour_start, Unavailable(str(e)))
-
-    next_to_process = 0  # Index in hours_to_fetch
-
-    def _advance_resample_progress() -> None:
-        if progress is not None and rs_task_id is not None and resample_rule is not None:
-            progress.update(rs_task_id, advance=1)
-
-    def _mark_perm_gap(day: date, hour: int, reason: str) -> None:
-        """Record a permanent-gap hour (404 / decode-failure) for a day."""
-        day_perm_gap.add(day)
-        day_missing_hours.setdefault(day, set()).add(hour)
-        day_gap_reasons.setdefault(day, set()).add(reason)
-
-    def _flush_day(day: date) -> None:
-        """
-        Write daily 1-min candle CSVs (bid + ask, compressed) and delete .bi5 files + day
-        directory.
-
-        A clean day (no 404s or decode failures) is always committed. A day with
-        a permanent-gap hour is committed from its available hours only once it
-        is older than ``commit_partial_after_days`` — a *partial commit* recorded
-        in the per-symbol manifest. Younger gap days are left for retry, and
-        scale-sentry-rejected days are never committed. Always advances the
-        cache progress task.
-        """
-        nonlocal days_rejected_scale_sentry, days_committed_partial
-        bid_frames = day_bid_frames.pop(day, [])
-        ask_frames = day_ask_frames.pop(day, [])
-
-        def _advance_cache_progress() -> None:
-            if progress is not None and cache_task_id is not None:
-                progress.update(cache_task_id, advance=1)
-
-        if cache_dir is None:
-            _advance_cache_progress()
+    def settle(day: date, decision: Decision) -> None:
+        """Act on a final decision for one day: leave it, or commit it and record it."""
+        assert cache_dir is not None
+        bid_frames = day_bid.pop(day, [])
+        ask_frames = day_ask.pop(day, [])
+        if isinstance(decision, Leave):
+            counts["left_uncommitted"] += 1
+            advance(cache_task)
+            log.debug(f"{symbol}: {day.isoformat()} left uncommitted ({decision.reason})")
             return
-
-        # A day with an hour this run could not fetch is never committed, whole
-        # or partial, whatever its age: the hour may exist. Its downloaded bi5
-        # stay in place for the next run.
-        if day in day_unavailable:
-            _advance_cache_progress()
-            return
-
-        # A permanent-gap day (404 / decode-failure hours) is only committed
-        # once it is old enough that the gap is provably permanent. Younger gap
-        # days keep the original behaviour: leave the bi5 in place so the next
-        # run can retry, and write nothing.
-        is_partial = day in day_perm_gap
-        if is_partial and (today_utc - day).days < commit_partial_after_days:
-            _advance_cache_progress()
-            return
-
+        assert isinstance(decision, Commit)
         bid_df = _assemble_day(bid_frames)
         ask_df = _assemble_day(ask_frames)
-
-        # A permanent-gap day with no decoded hours at all has nothing to
-        # commit; leave it untouched (404 hours wrote no bi5 anyway).
-        if is_partial and bid_df.empty and ask_df.empty:
-            _advance_cache_progress()
-            return
-
-        # A day the scale sentry refuses keeps its bi5 files so a subsequent
-        # retry with the correct --price-divisor can write the day cleanly.
-        # Scale-rejection dominates a permanent gap: such a day is recorded in
-        # day_scale_rejected and never partial-committed.
         outcome = _commit_day(cache_dir, symbol, day, bid_df, ask_df)
+        advance(cache_task)
         if outcome == "scale_rejected":
-            days_rejected_scale_sentry += 1
-            day_scale_rejected.add(day)
-        if outcome != "committed":
-            _advance_cache_progress()
+            counts["rejected_scale_sentry"] += 1
             return
-
-        # Delete .bi5 files for this day and remove the now-empty day directory
-        day_dir: Path | None = None
-        day_hours: list[int] = []
-        for h in hours_to_fetch:
-            if h.date() != day:
-                continue
-            day_hours.append(h.hour)
-            bi5_path = (
-                cache_dir
-                / symbol
-                / f"{h.year}"
-                / f"{h.month - 1:02d}"
-                / f"{h.day:02d}"
-                / f"{h.hour:02d}h_ticks.bi5"
-            )
-            if day_dir is None:
-                day_dir = bi5_path.parent
-            if bi5_path.exists():
-                try:
-                    bi5_path.unlink()
-                except OSError:
-                    log.warning(f"{symbol}: could not delete bi5 cache: {bi5_path}")
-
-        if day_dir is not None:
-            try:
-                day_dir.rmdir()
-            except OSError:
-                pass  # Not empty or already gone; that's fine
-
-        # Provenance: the day came from this run's hours of the Dukascopy datafeed.
-        # The divisor only applies to int32-encoded ticks; float ticks are stored as-is.
-        hours_label = f"{min(day_hours):02d}h-{max(day_hours):02d}h" if day_hours else "no hours"
+        if outcome != "committed":
+            counts["left_uncommitted"] += 1
+            return
+        empty = bid_df.empty and ask_df.empty
+        counts["committed"] += 1
+        if empty:
+            counts["committed_empty"] += 1
+        prov = run.committed(day, empty=empty)
         _append_source_manifest(
             cache_dir,
             symbol,
             day,
-            source="dukascopy",
-            scale_factor=1.0 / (price_divisor or 1.0) if detected_format == "int" else 1.0,
-            source_unit=(
-                f"{symbol}/{day.year}/{day.month - 1:02d}/{day.day:02d}/{hours_label}_ticks.bi5"
-            ),
+            source=source.name,
+            scale_factor=prov.scale_factor,
+            source_unit=prov.source_unit,
         )
-
-        # Record the partial commit so downstream data-quality checks can tell a
-        # known-permanent gap from a complete day.
-        if is_partial:
-            days_committed_partial += 1
-            missing = sorted(day_missing_hours.get(day, set()))
-            reasons = day_gap_reasons.get(day, set())
-            gap_reason = "+".join(sorted(reasons)) if reasons else "unknown"
-            _append_partial_day_manifest(cache_dir, symbol, day, missing, gap_reason)
-            log.info(
-                f"{symbol}: partial-committed {day.isoformat()} "
-                f"({len(missing)} permanent-gap hour(s): {missing}, reason={gap_reason})"
+        if decision.partial is not None:
+            counts["committed_partial"] += 1
+            _append_partial_day_manifest(
+                cache_dir,
+                symbol,
+                day,
+                decision.partial.missing_hours,
+                decision.partial.gap_reason,
             )
+            log.info(f"{symbol}: partial-committed {day.isoformat()} ({decision.partial.note})")
 
-        _advance_cache_progress()
+    def decide(ready: list[date]) -> None:
+        """Ask the source about every ready day, oldest first, and settle the final answers."""
+        if cache_dir is None:
+            return
+        for day in sorted(set(waiting) | set(ready)):
+            waiting.pop(day, None)
+            decision = run.decide(day, has_data=day in days_with_data)
+            if isinstance(decision, Wait):
+                waiting[day] = decision
+            else:
+                settle(day, decision)
 
-    def _process_ready_hours() -> None:
-        nonlocal next_to_process, hours_missing_404, hours_empty_200, hours_downloaded
-        nonlocal hours_unavailable, hours_decode_failed, hours_resampled_nonempty, detected_format
-        nonlocal hours_loaded_from_cache
-
-        while next_to_process < len(hours_to_fetch):
-            current_hour = hours_to_fetch[next_to_process]
-
-            if current_hour not in hour_data:
-                break  # Wait for this hour to download
-
-            comp = hour_data.pop(current_hour)
-            next_to_process += 1
-
-            cache_path = None
-            if cache_dir is not None:
-                cache_path = (
-                    cache_dir
-                    / symbol
-                    / f"{current_hour.year}"
-                    / f"{current_hour.month - 1:02d}"
-                    / f"{current_hour.day:02d}"
-                    / f"{current_hour.hour:02d}h_ticks.bi5"
-                )
-
-            current_day = current_hour.date()
-            is_last_hour_of_day = current_hour == last_hour_of_day[current_day]
-
-            # --- Cached day: load daily 1-min candle CSVs on the last hour of the day ---
-            if comp is _DAY_CACHED:
-                hours_loaded_from_cache += 1
-                if is_last_hour_of_day and resample_rule is not None:
-                    bid_candles = _load_daily_candles(
-                        _daily_candle_path(cache_dir, symbol, current_day, "bid")  # type: ignore[arg-type]
-                    )
-                    ask_candles = _load_daily_candles(
-                        _daily_candle_path(cache_dir, symbol, current_day, "ask")  # type: ignore[arg-type]
-                    )
-                    if bid_candles is not None and not bid_candles.empty:
-                        all_1min_bid_frames.append(bid_candles)
-                    if ask_candles is not None and not ask_candles.empty:
-                        all_1min_ask_frames.append(ask_candles)
-                _advance_resample_progress()
-                continue
-
-            # --- Could not fetch this run (timeouts, 429, 5xx): not a gap ---
-            if isinstance(comp, Unavailable):
-                hours_unavailable += 1
-                day_unavailable.add(current_day)
-                _advance_resample_progress()
-                if is_last_hour_of_day:
-                    _flush_day(current_day)
-                continue
-
-            # --- 404: no data for this hour ---
-            if comp is None:
-                hours_missing_404 += 1
-                _mark_perm_gap(current_day, current_hour.hour, "missing_404")
-                _advance_resample_progress()
-                if is_last_hour_of_day:
-                    _flush_day(current_day)
-                continue
-
-            # --- Empty 200: legitimate market-closed hour ---
-            if len(comp) == 0:  # type: ignore[arg-type]
-                hours_empty_200 += 1
-                _advance_resample_progress()
-                if is_last_hour_of_day:
-                    _flush_day(current_day)
-                continue
-
-            hours_downloaded += 1
-
-            if detected_format is None:
-                detected_format = _probe_price_format(comp)  # type: ignore[arg-type]
-                log.info(f"{symbol}: detected tick price format = {detected_format}")
-                if detected_format == "int" and price_divisor == 1.0:
-                    # Warn when int32 format is used with the default divisor.
-                    # Dukascopy encodes FX tick prices as integers scaled by a
-                    # point-factor (e.g. 10 000 for 4-decimal pairs).  If you
-                    # pass --price-divisor 1.0 (the default) the cached candles
-                    # will store raw integer values instead of real prices.
-                    # Use tradedesk-md-normalize to fix an affected cache.
-                    log.warning(
-                        "%s: int32 tick format detected with --price-divisor 1.0 (default). "
-                        "Decoded prices will be raw integer values, not actual market prices. "
-                        "Pass the correct --price-divisor for this instrument "
-                        "(e.g. 10000 for 4-decimal FX, 100 for JPY crosses) "
-                        "or run 'tradedesk-md-normalize' on an existing cache.",
-                        symbol,
-                    )
-
-            # --- Decode ticks ---
-            try:
-                assert detected_format is not None
-                ticks = _decode_ticks(
-                    current_hour,
-                    comp,  # type: ignore[arg-type]
-                    price_format=detected_format,
-                    price_divisor=price_divisor,
-                )
-            except lzma.LZMAError:
-                if cache_path is not None and cache_path.exists():
-                    try:
-                        log.warning(f"{symbol}: deleting suspect cache file: {cache_path}")
-                        cache_path.unlink()
-                    except OSError:
-                        log.error(f"{symbol}: rm failed: suspect cache file: {cache_path}")
-
-                comp2 = _download_bi5(
-                    _dukascopy_tick_url(symbol, current_hour),
-                    cache_path=cache_path,
-                    timeout=timeout,
-                    retries=retries,
-                )
-                if isinstance(comp2, Unavailable):
-                    hours_unavailable += 1
-                    day_unavailable.add(current_day)
-                    _advance_resample_progress()
-                    if is_last_hour_of_day:
-                        _flush_day(current_day)
+    def process(unit: Any, raw: Any) -> None:
+        """Decode one unit, file its candles under their UTC days, and decide ready days."""
+        ticks = run.decode(unit, raw)
+        wanted = resample_rule is not None or cache_dir is not None
+        if ticks is not None and len(ticks) and wanted:
+            for day, part in _split_days(ticks):
+                if day not in pending_set:
                     continue
-                if comp2 is None:
-                    _mark_perm_gap(current_day, current_hour.hour, "decode_failed")
-                    _advance_resample_progress()
-                    if is_last_hour_of_day:
-                        _flush_day(current_day)
-                    continue
-
-                try:
-                    ticks = _decode_ticks(
-                        current_hour,
-                        comp2,
-                        price_format=detected_format,
-                        price_divisor=price_divisor,
-                    )
-                except Exception as e:
-                    log.warning(f"corrupt hour {_dukascopy_tick_url(symbol, current_hour)}: {e}")
-                    hours_decode_failed += 1
-                    _mark_perm_gap(current_day, current_hour.hour, "decode_failed")
-                    _advance_resample_progress()
-                    if is_last_hour_of_day:
-                        _flush_day(current_day)
-                    continue
-            except Exception as e:
-                log.warning(f"skipping hour {_dukascopy_tick_url(symbol, current_hour)}: {e}")
-                hours_decode_failed += 1
-                _mark_perm_gap(current_day, current_hour.hour, "decode_failed")
-                _advance_resample_progress()
-                if is_last_hour_of_day:
-                    _flush_day(current_day)
-                continue
-
-            # --- Generate 1-minute candles for bid and ask ---
-            if resample_rule is not None or cache_dir is not None:
-                one_min_bid = _ticks_to_candles(ticks, resample_rule="1min", price_side="bid")
-                one_min_ask = _ticks_to_candles(ticks, resample_rule="1min", price_side="ask")
+                bid_c = _ticks_to_candles(part, resample_rule="1min", price_side="bid")
+                ask_c = _ticks_to_candles(part, resample_rule="1min", price_side="ask")
                 if resample_rule is not None:
-                    if not one_min_bid.empty or not one_min_ask.empty:
-                        hours_resampled_nonempty += 1
-                    if not one_min_bid.empty:
-                        all_1min_bid_frames.append(one_min_bid)
-                    if not one_min_ask.empty:
-                        all_1min_ask_frames.append(one_min_ask)
+                    if not bid_c.empty:
+                        all_bid.append(bid_c)
+                    if not ask_c.empty:
+                        all_ask.append(ask_c)
                 if cache_dir is not None:
-                    if not one_min_bid.empty:
-                        day_bid_frames.setdefault(current_day, []).append(one_min_bid)
-                    if not one_min_ask.empty:
-                        day_ask_frames.setdefault(current_day, []).append(one_min_ask)
+                    if not bid_c.empty:
+                        day_bid.setdefault(day, []).append(bid_c)
+                    if not ask_c.empty:
+                        day_ask.setdefault(day, []).append(ask_c)
+                    if not (bid_c.empty and ask_c.empty):
+                        days_with_data.add(day)
+        advance(rs_task)
+        ready = []
+        for ud in unit.days:
+            if ud in remaining:
+                remaining[ud] -= 1
+                if remaining[ud] == 0:
+                    ready.append(ud)
+        decide(ready)
 
-            _advance_resample_progress()
+    def fetch(unit: Any) -> Any:
+        check_cancelled()
+        raw = run.fetch(unit)
+        advance(dl_task)
+        return raw
 
-            if current_hour.hour == 0 and progress is None:
-                log.info(f"{symbol}: processed up to {current_hour.isoformat()}")
+    # Days no unit covers have nothing to decide on.
+    if cache_dir is not None:
+        for day in pending:
+            if remaining[day] == 0:
+                settle(day, Leave("no unit covers it"))
 
-            if is_last_hour_of_day:
-                _flush_day(current_day)
+    workers = max(1, int(run.fetch_workers))
+    if workers == 1:
+        for unit in units:
+            process(unit, fetch(unit))
+    else:
+        # Not a `with` block: its exit would call shutdown(wait=True) and drain every
+        # queued unit before returning, which is what kept a cancelled export running.
+        executor = ThreadPoolExecutor(max_workers=workers)
+        interrupted = False
+        try:
+            futures = {executor.submit(fetch, unit): i for i, unit in enumerate(units)}
+            fetched: dict[int, Any] = {}
+            next_to_process = 0
+            for future in as_completed(futures):
+                check_cancelled()
+                fetched[futures[future]] = future.result()
+                # Process in plan order: a unit waits for the ones before it.
+                while next_to_process in fetched:
+                    process(units[next_to_process], fetched.pop(next_to_process))
+                    next_to_process += 1
+        except KeyboardInterrupt:
+            interrupted = True
+            log.warning(f"{symbol}: download interrupted")
+            raise
+        finally:
+            # On a cancel, drop the queued units and return at once; the in-flight
+            # requests end at their next timeout or cancel check.
+            executor.shutdown(wait=not interrupted, cancel_futures=interrupted)
 
-    # Not a `with` block: its exit would call shutdown(wait=True) and drain every
-    # queued hour before returning, which is what kept a cancelled export running.
-    executor = ThreadPoolExecutor(max_workers=DOWNLOAD_THREADS_PER_INSTRUMENT)
-    interrupted = False
-    try:
-        futures = {executor.submit(download_hour, h): h for h in hours_to_download}
+    for day, wait in sorted(waiting.items()):
+        settle(day, Leave(wait.reason))
+    waiting.clear()
 
-        for future in as_completed(futures):
-            check_cancelled()
-
-            hour_start, comp = future.result()
-            hour_data[hour_start] = comp
-
-            _process_ready_hours()
-
-    except KeyboardInterrupt:
-        interrupted = True
-        log.warning(f"{symbol}: download interrupted")
-        raise
-    finally:
-        # On a cancel, drop the queued hours and return at once; the in-flight
-        # requests end at their next timeout or cancel check.
-        executor.shutdown(wait=not interrupted, cancel_futures=interrupted)
-
-    # Flush any remaining hours (e.g. all days were cached, no futures ran)
-    _process_ready_hours()
-
-    log.info(
-        f"{symbol}: hours total={hours_total}, missing_404={hours_missing_404}, "
-        f"missing_200={hours_empty_200}, downloaded={hours_downloaded}, "
-        f"unavailable={hours_unavailable}, "
-        f"decode_failed={hours_decode_failed}, "
-        f"resampled_nonempty={hours_resampled_nonempty}, "
-        f"loaded_from_cache={hours_loaded_from_cache}, "
-        f"days_rejected_scale_sentry={days_rejected_scale_sentry}, "
-        f"days_committed_partial={days_committed_partial}, "
-        f"days_left_for_retry={len(day_unavailable)}"
-    )
-    if day_unavailable:
-        log.warning(
-            f"{symbol}: {hours_unavailable} hour(s) could not be fetched this run; "
-            f"{len(day_unavailable)} day(s) left uncommitted. Re-run to retry them."
+    run.finish()
+    if cache_dir is not None:
+        log.info(
+            f"{symbol}: days total={len(days)}, already_cached={len(already)}, "
+            f"committed={counts['committed']} (empty={counts['committed_empty']}, "
+            f"partial={counts['committed_partial']}), "
+            f"rejected_scale_sentry={counts['rejected_scale_sentry']}, "
+            f"left_uncommitted={counts['left_uncommitted']}"
         )
 
     if resample_rule is None:
         return (None, None)
 
+    if cache_dir is not None:
+        for day in sorted(already):
+            for side, frames in (("bid", all_bid), ("ask", all_ask)):
+                df = _load_daily_candles(_daily_candle_path(cache_dir, symbol, day, side))
+                if df is not None and not df.empty:
+                    frames.append(df)
+
     return _write_range_outputs(
         symbol,
-        all_1min_bid_frames,
-        all_1min_ask_frames,
+        all_bid,
+        all_ask,
         out=out,
         resample_rule=resample_rule,
         start_utc=start_utc,
         end_utc_inclusive=end_utc_inclusive,
         progress=progress,
-        write_task_id=write_task_id,
+        write_task_id=write_task,
     )
