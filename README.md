@@ -363,35 +363,43 @@ a file that does not follow this schema is a usage error.
   XAUUSD `$2063.625` as `206362.5`, and indices stay in points. The scale is
   recorded with every day and in the sidecar (`price_divisor` = 1/scale,
   `params.scale_factor` = scale).
-- **Verification.** An export of a symbol whose `scale_verified` is false
-  logs a warning. Check a few committed days against another source before
-  trusting them.
+- **Verification.** An entry is verified only when its `scale_evidence`
+  records the other source's figure that confirmed the scale; the loader
+  refuses `scale_verified = true` without it. An export of an unverified
+  symbol logs a warning. Check a few committed days against another source
+  before trusting them, then record the figure in your copy of the map.
+- **Brent.** BRENTCMDUSD's scale is 100: Dukascopy stores Brent in cents
+  (9712.8 on 2022-02-21 where HistData quotes 97.128). Earlier versions of the
+  map had 1. **Existing HistData BRENTCMDUSD days are 100× too small**: delete
+  them and run the export again. Units kept with `--keep-raw` are re-decoded
+  locally, and the rest are fetched again.
 - **Exclusion spans.** A day inside a span gets no day files and an excluded
   record in `_sources.jsonl` (see Provenance above).
 
 The shipped map:
 
-| Cache symbol | HistData | Scale | First month | Verified |
+| Cache symbol | HistData | Scale | First month | Verified (Dukascopy figure) |
 |---|---|---|---|---|
-| USA500IDXUSD | SPXUSD | 1 | 2010-11 | yes |
-| DEUIDXEUR | GRXEUR | 1 | 2010-11 | yes; 2020-06-17..2023-12-05 excluded (below) |
-| GBRIDXGBP | UKXGBP | 1 | 2010-11 | yes |
-| JPNIDXJPY | JPXJPY | 1 | 2010-11 | yes |
-| AUSIDXAUD | AUXAUD | 1 | 2010-11 | yes |
-| BRENTCMDUSD | BCOUSD | 1 | 2010-11 | **no**: the datafeed's Brent unit is cents, so 100 is expected |
-| XAUUSD | XAUUSD | 100 | 2009-03 | yes |
-| EURUSD, GBPUSD, USDCHF | same | 10000 | 2000-05 | yes |
-| AUDUSD, USDCAD | same | 10000 | 2000-06 | yes |
-| USDJPY | USDJPY | 100 | 2000-05 | yes |
-| GBPJPY | GBPJPY | 100 | 2002-05 | yes |
-| AUDJPY, CHFJPY | same | 100 | 2002-08 | yes |
-| EURCHF, EURGBP | same | 10000 | 2002-03 | yes |
-| GBPCHF | GBPCHF | 10000 | 2002-08 | yes |
-| EURCAD | EURCAD | 10000 | 2007-03 | yes |
-| AUDCAD | AUDCAD | 10000 | 2007-07 | yes |
-| AUDNZD, GBPAUD | same | 10000 | 2007-09 | yes |
-| NZDCAD | NZDCAD | 10000 | 2008-03 | yes |
-| EURSEK | EURSEK | 10000 | 2008-08 | **no** |
+| USA500IDXUSD | SPXUSD | 1 | 2010-11 | yes (median close ~4782) |
+| DEUIDXEUR | GRXEUR | 1 | 2010-11 | no; 2020-06-17..2023-12-05 excluded (below) |
+| GBRIDXGBP | UKXGBP | 1 | 2010-11 | no |
+| JPNIDXJPY | JPXJPY | 1 | 2010-11 | no |
+| AUSIDXAUD | AUXAUD | 1 | 2010-11 | no |
+| BRENTCMDUSD | BCOUSD | 100 | 2010-11 | yes (2022-02-21: raw 9712.8 for 97.128) |
+| XAUUSD | XAUUSD | 100 | 2009-03 | yes (median close ~151948) |
+| EURUSD | EURUSD | 10000 | 2000-05 | yes (median close ~11217) |
+| GBPUSD, USDCHF | same | 10000 | 2000-05 | no |
+| AUDUSD, USDCAD | same | 10000 | 2000-06 | no |
+| USDJPY | USDJPY | 100 | 2000-05 | yes (median close ~12029) |
+| GBPJPY | GBPJPY | 100 | 2002-05 | no |
+| AUDJPY, CHFJPY | same | 100 | 2002-08 | no |
+| EURCHF, EURGBP | same | 10000 | 2002-03 | no |
+| GBPCHF | GBPCHF | 10000 | 2002-08 | no |
+| EURCAD | EURCAD | 10000 | 2007-03 | no |
+| AUDCAD | AUDCAD | 10000 | 2007-07 | no |
+| AUDNZD, GBPAUD | same | 10000 | 2007-09 | no |
+| NZDCAD | NZDCAD | 10000 | 2008-03 | no |
+| EURSEK | EURSEK | 10000 | 2008-08 | no |
 
 The map's `[histdata]` section holds settings for every instrument:
 `max_month_join_step` (default `0.7`) is the threshold of the month-join level
