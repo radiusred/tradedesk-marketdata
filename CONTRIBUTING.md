@@ -8,6 +8,31 @@ standards and workflow you need to contribute successfully.
 This repository is intentionally standalone and does not depend on the
 `tradedesk` framework.
 
+## What this repository holds
+
+This is a public repository. It holds:
+
+- the market-data downloader: the export framework, its CLIs, and its cache
+  repair and audit tools;
+- its providers (`tradedesk_marketdata/sources/`), each with the shipped
+  example configuration a user copies and edits (such as
+  `sources/histdata.example.toml`);
+- their tests, fixtures (synthetic, never downloaded provider data) and
+  documentation.
+
+It does not hold:
+
+- trading strategies, signals or anything that decides a trade;
+- research artefacts: results, notebooks, reports, findings about a market;
+- venue-, account- or deployment-specific configuration or paths: no one
+  user's cache location, instrument list, credentials or hosts in code,
+  docs, examples or tests.
+
+Until tooling enforces this, it is a review rule: a contribution that adds
+any of the above is declined.
+
+New providers follow [Writing a source](docs/writing-a-source.md).
+
 ## Getting Started
 
 1. Fork the repository and create a feature branch from `main`.
