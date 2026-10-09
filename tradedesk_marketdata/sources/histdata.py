@@ -228,12 +228,42 @@ def _parse_entry(where: str, symbol: str, entry: object) -> HistDataInstrument:
     )
 
 
+@dataclass(frozen=True)
+class HistDataSettings:
+    """The symbol map's ``[histdata]`` section: settings for every instrument."""
+
+    # The month-join level check refuses a month whose first trading day's
+    # close is more than (1 + this) times, or less than 1 / (1 + this) times,
+    # the last accepted close before it.
+    max_month_join_step: float = 0.7
+
+
+_SETTINGS_KEYS = {"max_month_join_step"}
+
+
+def _parse_settings(where: str, section: object) -> HistDataSettings:
+    if not isinstance(section, dict):
+        raise SymbolMapError(f"{where}: [histdata] must be a table")
+    unknown = set(section) - _SETTINGS_KEYS
+    if unknown:
+        raise SymbolMapError(f"{where}: histdata: unknown key(s) {', '.join(sorted(unknown))}")
+    step = section.get("max_month_join_step", HistDataSettings.max_month_join_step)
+    if isinstance(step, bool) or not isinstance(step, int | float) or not step > 0:
+        raise SymbolMapError(f"{where}: histdata.max_month_join_step must be a number above zero")
+    return HistDataSettings(max_month_join_step=float(step))
+
+
 def load_symbol_map(path: Path | None = None) -> dict[str, HistDataInstrument]:
-    """Read a TOML symbol map (the shipped example when ``path`` is None).
+    """Read a TOML symbol map's instruments (the shipped example when ``path`` is None).
 
     Raises ``SymbolMapError`` for a file that cannot be read or does not follow
     the schema documented in the example.
     """
+    return load_map(path)[0]
+
+
+def load_map(path: Path | None = None) -> tuple[dict[str, HistDataInstrument], HistDataSettings]:
+    """Read a TOML symbol map: its instruments and its ``[histdata]`` settings."""
     if path is None:
         where = SYMBOL_MAP_EXAMPLE
         raw = (
@@ -251,10 +281,10 @@ def load_symbol_map(path: Path | None = None) -> dict[str, HistDataInstrument]:
         data = tomllib.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
         raise SymbolMapError(f"{where}: not a TOML file ({e})") from None
-    if set(data) - {"symbols"}:
-        raise SymbolMapError(
-            f"{where}: unknown top-level key(s) {', '.join(sorted(set(data) - {'symbols'}))}"
-        )
+    unknown = set(data) - {"symbols", "histdata"}
+    if unknown:
+        raise SymbolMapError(f"{where}: unknown top-level key(s) {', '.join(sorted(unknown))}")
+    settings = _parse_settings(where, data.get("histdata", {}))
     table = data.get("symbols")
     if not isinstance(table, dict) or not table:
         raise SymbolMapError(f"{where}: no [symbols.<SYMBOL>] entries")
@@ -264,7 +294,7 @@ def load_symbol_map(path: Path | None = None) -> dict[str, HistDataInstrument]:
         if key != symbol:
             raise SymbolMapError(f"{where}: symbols.{symbol}: write the cache symbol as {key}")
         out[key] = _parse_entry(where, symbol, entry)
-    return out
+    return out, settings
 
 
 # The shipped symbol map, as loaded.
@@ -597,6 +627,7 @@ class _HistDataRun(SourceRun):
         self.ctx = ctx
         self.symbol = ctx.symbol
         self.inst = source.instrument(ctx.symbol)
+        self.max_step = source.settings.max_month_join_step
         if not self.inst.scale_verified:
             log.warning(
                 f"{self.symbol}: the symbol map's scale {self.inst.scale:g} for HistData "
@@ -605,14 +636,18 @@ class _HistDataRun(SourceRun):
             )
         self.now = datetime.now(UTC)
         self.settle_after = timedelta(days=ctx.commit_partial_after_days)
-        self.status: dict[YearMonth, str] = {}  # ok | before_first | unavailable | failed
+        # ok | before_first | unavailable | failed | refused (by the level check)
+        self.status: dict[YearMonth, str] = {}
         self.first_tick: datetime | None = None
         self.last_tick: datetime | None = None
         self.requested = False
         self.months: list[YearMonth] = []
         self.failed_months: list[YearMonth] = []
+        self.refused_months: list[YearMonth] = []
+        # The last accepted close, for the month-join level check: (day, bid close).
+        self.reference: tuple[date, float] | None = None
         self.counts = dict.fromkeys(
-            ("from_cache", "downloaded", "unavailable", "before_first", "failed"), 0
+            ("from_cache", "downloaded", "unavailable", "before_first", "failed", "refused"), 0
         )
 
     # --- month arithmetic for this run ---
@@ -744,10 +779,75 @@ class _HistDataRun(SourceRun):
             ticks = ticks.iloc[lo:hi]
         if ticks.empty:
             return None
+        if not self._level_check(ym, ticks):
+            self.status[ym] = "refused"
+            self.counts["refused"] += 1
+            self.refused_months.append(ym)
+            return None
         t0, t1 = ticks.index[0].to_pydatetime(), ticks.index[-1].to_pydatetime()
         self.first_tick = t0 if self.first_tick is None else min(self.first_tick, t0)
         self.last_tick = t1 if self.last_tick is None else max(self.last_tick, t1)
         return ticks
+
+    # --- the month-join level check ---
+    #
+    # The provider's own guard against a substituted series: HistData has served
+    # another instrument's levels under a symbol for years at a time. It compares
+    # a month with the HistData data before it, even in a fresh cache. The
+    # framework's scale sentry is different: it compares a day with neighbours
+    # already in the cache, so it cannot see a substitution that fills a fresh
+    # cache consistently.
+
+    def _closes(self, ticks: pd.DataFrame) -> list[tuple[date, float]]:
+        """Each UTC trading day's last bid in a month's ticks, excluded days left out."""
+        last = ticks["bid"].groupby(pd.DatetimeIndex(ticks.index).normalize()).last()
+        days = pd.DatetimeIndex(last.index)
+        closes = [(ts.date(), float(c)) for ts, c in zip(days, last.to_numpy(), strict=True)]
+        return [(d, c) for d, c in closes if self.inst.excluded(d) is None]
+
+    def _cache_reference(self, before: date) -> tuple[date, float] | None:
+        """The last close of the nearest committed day in the 7 days before ``before``."""
+        cache_dir = self.ctx.cache_dir
+        if cache_dir is None:
+            return None
+        for back in range(1, 8):
+            day = before - timedelta(days=back)
+            if self.inst.excluded(day) is not None:
+                continue
+            path = _export._daily_candle_path(cache_dir, self.symbol, day, "bid")
+            df = _export._load_daily_candles(path) if path.exists() else None
+            if df is not None and not df.empty:
+                return (day, float(df["close"].iloc[-1]))
+        return None
+
+    def _level_check(self, ym: YearMonth, ticks: pd.DataFrame) -> bool:
+        """Whether a month's level joins the last accepted close; False refuses it.
+
+        The month's first trading day's close is compared with the last close
+        of the last month accepted in this run, or, failing that, of the
+        nearest committed day in the cache. When the larger is more than
+        ``1 + max_month_join_step`` times the smaller, the month is refused. A
+        refused month is never a reference, so a substitution lasting several
+        months is refused until the level returns. Days in an exclusion span
+        are left out on both sides.
+        """
+        closes = self._closes(ticks)
+        if not closes:
+            return True
+        day, close = closes[0]
+        ref = self.reference or self._cache_reference(day)
+        if ref is not None and close > 0 and ref[1] > 0:
+            ratio = max(close / ref[1], ref[1] / close)
+            if ratio > 1 + self.max_step:
+                log.warning(
+                    f"{self.symbol}: refusing HistData month {ym[0]}-{ym[1]:02d}: its first "
+                    f"close {close:g} ({day}) is {ratio:.2f}x the last accepted close "
+                    f"{ref[1]:g} ({ref[0]}), beyond max_month_join_step "
+                    f"{self.max_step:g}; its days stay uncommitted"
+                )
+                return False
+        self.reference = closes[-1]
+        return True
 
     def excludes(self, day: date) -> str | None:
         span = self.inst.excluded(day)
@@ -760,8 +860,6 @@ class _HistDataRun(SourceRun):
     def decide(self, day: date, *, has_data: bool) -> Decision:
         # A day inside one of the symbol map's exclusion spans is never committed
         # from HistData, whatever its data; the framework records why.
-        # TODO(#83): a month-join level check, the provider's own guard against a
-        # substituted instrument, belongs here too.
         span = self.inst.excluded(day)
         if span is not None:
             return Exclude(span.reason, source_unit=self._units(day))
@@ -769,6 +867,8 @@ class _HistDataRun(SourceRun):
         states = [self.status[m] for m in needed]
         if "failed" in states:
             return Leave("a month it needs failed to download")
+        if "refused" in states:
+            return Leave("a month it needs failed the month-join level check")
         missing = [m for m in needed if self.status[m] == "unavailable"]
         if missing:
             if all(self.is_settled(m) for m in missing) and has_data:
@@ -822,8 +922,16 @@ class _HistDataRun(SourceRun):
             f"{self.symbol}: histdata months total={len(self.months)}, "
             f"from_cache={c['from_cache']}, downloaded={c['downloaded']}, "
             f"unavailable={c['unavailable']}, before_first={c['before_first']}, "
-            f"failed={c['failed']}"
+            f"failed={c['failed']}, refused={c['refused']}"
         )
+        if self.refused_months:
+            log.warning(
+                f"{self.symbol}: {len(self.refused_months)} HistData month(s) refused by the "
+                f"month-join level check: "
+                f"{', '.join(f'{y}-{m:02d}' for y, m in self.refused_months)}; their days stay "
+                "uncommitted (add an exclusion span, or raise max_month_join_step if the move "
+                "is real)"
+            )
         if self.failed_months:
             log.warning(
                 f"{self.symbol}: {len(self.failed_months)} HistData month(s) failed after "
@@ -861,7 +969,8 @@ class HistDataSource(Source):
     def __init__(self, options: Mapping[str, Any] | None = None) -> None:
         super().__init__(options)
         self.symbol_map: Path | None = self.option("symbol_map")
-        self.symbols = load_symbol_map(self.symbol_map)  # SymbolMapError on a bad file
+        # SymbolMapError on a bad file.
+        self.symbols, self.settings = load_map(self.symbol_map)
 
     def instrument(self, symbol: str) -> HistDataInstrument:
         """The symbol's HistData mapping (raises ``UnmappedSymbolError``)."""
