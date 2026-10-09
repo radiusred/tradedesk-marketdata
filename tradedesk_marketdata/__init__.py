@@ -7,6 +7,6 @@ writes the same candle cache.
 Copyright 2026 Radius Red Ltd.
 """
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 __all__ = ["__version__"]
