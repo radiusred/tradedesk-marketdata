@@ -2,7 +2,7 @@
 
 Usage::
 
-    tradedesk-md-normalize --cache-dir ./cache [--symbols EURUSD AUDNZD] [--dry-run]
+    tradedesk-md-normalize --cache-dir ./cache [--symbols EURUSD AUDNZD] [--bands FILE] [--dry-run]
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import logging
 import sys
 from pathlib import Path
 
-from .normalize import normalize_cache
+from .normalize import PRICE_BANDS_EXAMPLE, PriceBandsError, load_price_bands, normalize_cache
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -37,6 +37,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Symbols to normalize (default: all subdirectories)",
     )
     parser.add_argument(
+        "--bands",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help="TOML file of expected natural-unit price bands per symbol "
+        f"(default: the shipped {PRICE_BANDS_EXAMPLE}; copy it to change it)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Report what would change without modifying any files",
@@ -47,6 +55,10 @@ def main(argv: list[str] | None = None) -> int:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
     args = parser.parse_args(argv)
+    try:
+        bands = load_price_bands(args.bands)
+    except PriceBandsError as e:
+        parser.error(str(e))
 
     logging.basicConfig(
         level=args.log_level,
@@ -63,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         log.info("DRY-RUN mode — no files will be modified")
 
-    results = normalize_cache(args.cache_dir, args.symbols, dry_run=args.dry_run)
+    results = normalize_cache(args.cache_dir, args.symbols, dry_run=args.dry_run, bands=bands)
 
     total_fixed = sum(r["fixed"] for r in results.values())
     total_errors = sum(r["errors"] for r in results.values())
