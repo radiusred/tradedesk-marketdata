@@ -73,7 +73,7 @@ are refused with any other source.
 | Unit fetched | one `.bi5` file per instrument-hour | one zip per instrument-month |
 | Coverage | varies per instrument | FX majors from 2000, GBPJPY 2002, XAUUSD 2009, the indices from 2010-11 (its symbol map) |
 | Prices | bid and ask per tick, with tick volume | bid and ask per tick; **no volume** (candle `volume` is `0.0`) |
-| Timestamps | UTC | EST without daylight saving (fixed UTC-5), converted to UTC on decode |
+| Timestamps | UTC | local time with daylight saving (New York, then Zurich − 6 h; see below), converted to UTC on decode |
 | Scaling | `--price-divisor` | per-symbol scale in the symbol map (`--symbol-map`) |
 | Speed and limits | heavily rate-limited; years of history take a very long time | ~190 requests for an index's whole history; sequential, one month at a time |
 
@@ -285,8 +285,8 @@ directories left behind in three cases:
 
 [HistData.com](https://www.histdata.com/) publishes free "Generic ASCII" tick
 files, one zip per instrument and month, each tick a
-`YYYYMMDD HHMMSSNNN,bid,ask,volume` line in EST without daylight-saving
-changes. It is a free service run for traders' own research and backtesting,
+`YYYYMMDD HHMMSSNNN,bid,ask,volume` line in a local time
+([Timestamps](#timestamps) below). It is a free service run for traders' own research and backtesting,
 not a licensed commercial feed: use it for personal backtesting, do not
 redistribute its files, and check its site for its current terms. The
 exporter treats it accordingly: requests for one instrument are strictly
@@ -303,6 +303,36 @@ tradedesk-md-export --source histdata --symbols USA500IDXUSD \
 ```
 
 HistData-only option: `--symbol-map`.
+
+#### Timestamps
+
+HistData describes its stamps as "EST without daylight saving", a fixed UTC-5.
+**That is wrong** for about seven months of every year, so the exporter does
+not use it. It decodes each stamp under the rule of the provider HistData
+took the data from:
+
+- **Before 2018-12-16:** `America/New_York` local time, US daylight saving
+  included.
+- **From 2018-12-16:** `Europe/Zurich` local time minus six hours, so EU
+  daylight saving.
+
+Both rules are UTC-5 in winter and UTC-4 in their own summer. The two eras
+differ in the weeks between the US and EU clock changes.
+
+The evidence: against a Dukascopy cache of the same instruments, HistData's
+winter days match minute for minute at shift 0, and its summer days match
+only an hour earlier, switching on the US calendar before 2018-12-16 and on
+the EU calendar after. The switch itself is where SPXUSD's 0.25-point price
+grid and its session times change, between Friday 2018-12-14 and Sunday
+2018-12-16. A stamp in a local hour that is skipped (spring forward) moves
+forward an hour, and one in a repeated hour (fall back) reads as its first
+occurrence. Both fall in the weekend close.
+
+**HistData days written before this rule was added** carry a one-hour shift
+on every day under daylight saving: their candles are stamped an hour late.
+To repair such a cache, delete the affected days' files and re-run the
+export. Units kept with `--keep-raw` are re-decoded locally, and the rest are
+downloaded again. Each re-committed day gets a new `_sources.jsonl` record.
 
 #### The symbol map (`--symbol-map`)
 
@@ -365,9 +395,9 @@ The shipped map:
 
 #### How a HistData run fills the cache
 
-- **Months.** A HistData month covers UTC 05:00 on the 1st to 05:00 on the
-  1st of the next month, so the 1st of a month also needs the previous month's
-  file. A month whose days are all committed already is skipped without a
+- **Months.** A HistData month covers its own stamps' month: UTC 05:00 on the
+  1st (04:00 under daylight saving) to the same time on the 1st of the next
+  month, so the 1st of a month also needs the previous month's file. A month whose days are all committed already is skipped without a
   request; a month before the instrument's first month is skipped with a log
   line. A month's zip is kept under `{cache}/{SYMBOL}/_histdata/{YYYY}{MM}.zip`
   while any day it covers is uncommitted, so the next run reuses it, and is
