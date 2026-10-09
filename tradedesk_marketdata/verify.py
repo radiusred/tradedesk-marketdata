@@ -17,12 +17,16 @@ Per day (``compare_day``): which sides have data, the row counts, the best
 whole-minute alignment among ``SHIFTS`` with the fraction of minutes whose
 OHLC is identical there, and the relative difference of the daily bars. A
 day's status is one of ``same``, ``shifted``, ``different``, ``only-left``
-(reference only), ``only-right`` (cache only) or ``empty``.
+(reference only), ``only-right`` (cache only), ``empty`` or ``unreadable`` (a
+day file that does not decode: logged, reported as a finding, never mistaken
+for a missing one).
 
 Per symbol (``summarise``): counts by status, worst and median daily
 difference per year, the close-ratio regimes as runs, and the findings: one
-actionable line per run of shifted days, per run of different days and per
-regime other than 1.0.
+actionable line per run of shifted days, per run of different days, per
+regime other than 1.0, per unreadable day file, and one when no day of the
+symbol has data on both sides (``no-overlap``: a mistyped symbol or cache
+directory must not pass as a clean result).
 """
 
 from __future__ import annotations
@@ -57,7 +61,20 @@ REGIME_TOLERANCE = 0.05
 DEFAULT_TOLERANCE = 0.002
 
 PRICE_COLUMNS = ("open", "high", "low", "close")
-STATUSES = ("same", "shifted", "different", "only-left", "only-right", "empty")
+STATUSES = ("same", "shifted", "different", "only-left", "only-right", "empty", "unreadable")
+#: Statuses of a day that has data on both sides: the days actually compared.
+COMPARED = ("same", "shifted", "different")
+
+
+@dataclass(frozen=True)
+class Finding:
+    """One actionable line. ``kind``: shifted, different, regime, unreadable or no-overlap."""
+
+    kind: str
+    message: str
+
+    def as_json(self) -> dict[str, str]:
+        return {"kind": self.kind, "message": self.message}
 
 
 @dataclass
@@ -75,6 +92,7 @@ class DayResult:
     daily_diff: float | None = None  # largest relative daily OHLC difference
     left_close: float | None = None
     right_close: float | None = None
+    unreadable: list[str] = field(default_factory=list)  # day files that did not decode
 
     def as_json(self) -> dict[str, Any]:
         out = asdict(self)
@@ -110,17 +128,23 @@ class SymbolReport:
     days: list[DayResult]
     years: dict[int, dict[str, Any]] = field(default_factory=dict)
     regimes: list[Regime] = field(default_factory=list)
-    findings: list[str] = field(default_factory=list)
+    findings: list[Finding] = field(default_factory=list)
 
     @property
     def failed(self) -> bool:
         return bool(self.findings)
 
+    @property
+    def compared(self) -> int:
+        """Days with data on both sides."""
+        return sum(1 for d in self.days if d.status in COMPARED)
+
     def as_json(self) -> dict[str, Any]:
         return {
             "symbol": self.symbol,
             "failed": self.failed,
-            "findings": self.findings,
+            "compared": self.compared,
+            "findings": [f.as_json() for f in self.findings],
             "years": {str(y): v for y, v in self.years.items()},
             "regimes": [r.as_json() for r in self.regimes],
             "days": [d.as_json() for d in self.days],
@@ -193,11 +217,22 @@ def _rel(a: float, b: float) -> float:
     return abs(b - a) / abs(a)
 
 
-def _load(path: Path) -> pd.DataFrame | None:
+class _Unreadable:
+    """A day file that exists but does not decode."""
+
+
+_UNREADABLE = _Unreadable()
+
+
+def _load(path: Path) -> pd.DataFrame | _Unreadable | None:
+    """A day file's minutes; ``None`` when there is no file or no row."""
     if not path.exists():
         return None
     df = _load_daily_candles(path)
-    if df is None or df.empty:
+    if df is None or not set(PRICE_COLUMNS) <= set(df.columns):
+        log.warning(f"unreadable day file {path}: not a candle CSV.zst; reported, not compared")
+        return _UNREADABLE
+    if df.empty:
         return None
     return df.sort_index()
 
@@ -219,6 +254,14 @@ def compare_day(
     if not lpath.exists() and not rpath.exists():
         return None
     left, right = _load(lpath), _load(rpath)
+    bad = [
+        f"{label} {path}"
+        for label, path, df in (("reference", lpath, left), ("cache", rpath, right))
+        if isinstance(df, _Unreadable)
+    ]
+    if bad:
+        return DayResult(symbol, day, "unreadable", 0, 0, unreadable=bad)
+    assert not isinstance(left, _Unreadable) and not isinstance(right, _Unreadable)
     lrows = 0 if left is None else len(left)
     rrows = 0 if right is None else len(right)
     if left is None and right is None:
@@ -343,22 +386,51 @@ def summarise(symbol: str, days: Sequence[DayResult], *, tolerance: float) -> Sy
     for run in _status_runs(report.days, "shifted"):
         shift = run[0].shift_minutes or 0
         report.findings.append(
-            f"{symbol} {_span(run)}: {len(run)} day(s) match the reference only shifted by "
-            f"{shift:+d} min (the cache's timestamps are {abs(shift)} min "
-            f"{'late' if shift > 0 else 'early'})"
+            Finding(
+                "shifted",
+                f"{symbol} {_span(run)}: {len(run)} day(s) match the reference only shifted by "
+                f"{shift:+d} min (the cache's timestamps are {abs(shift)} min "
+                f"{'late' if shift > 0 else 'early'})",
+            )
         )
     unexplained = [d for d in report.days if not (d.status == "different" and explained(d))]
     for run in _status_runs(unexplained, "different"):
         worst = max(d.daily_diff or 0.0 for d in run)
         report.findings.append(
-            f"{symbol} {_span(run)}: {len(run)} day(s) differ from the reference by more "
-            f"than {tolerance:g} at the daily level (worst {worst:.4g})"
+            Finding(
+                "different",
+                f"{symbol} {_span(run)}: {len(run)} day(s) differ from the reference by more "
+                f"than {tolerance:g} at the daily level (worst {worst:.4g})",
+            )
         )
     for r in off:
         span = r.first.isoformat() if r.first == r.last else f"{r.first}..{r.last}"
         report.findings.append(
-            f"{symbol} {span}: reference/cache close ratio {r.ratio:.4g} over {r.days} "
-            "day(s): another level or scale than the reference"
+            Finding(
+                "regime",
+                f"{symbol} {span}: reference/cache close ratio {r.ratio:.4g} over {r.days} "
+                "day(s): another level or scale than the reference",
+            )
+        )
+    for d in report.days:
+        for which in d.unreadable:
+            report.findings.append(
+                Finding(
+                    "unreadable",
+                    f"{symbol} {d.day.isoformat()}: the {which} day file does not decode; "
+                    "the day was not compared",
+                )
+            )
+    if report.compared == 0:
+        lefts = sum(1 for d in report.days if d.status == "only-left")
+        rights = sum(1 for d in report.days if d.status == "only-right")
+        report.findings.append(
+            Finding(
+                "no-overlap",
+                f"{symbol}: no day in the range has data on both sides ({lefts} day(s) only in "
+                f"the reference, {rights} only in the cache), so nothing was compared; check "
+                "--symbols, --reference, --cache-dir and the dates",
+            )
         )
     return report
 
@@ -453,18 +525,22 @@ def render_text(reports: Sequence[SymbolReport]) -> str:
             mark = "" if r.is_unity else "  <-"
             lines.append(f"  {rep.symbol} {span}: {r.ratio:.6g} ({r.days} day(s)){mark}")
     findings = [f for rep in reports for f in rep.findings]
+    total = sum(rep.compared for rep in reports)
+    per_symbol = ", ".join(f"{rep.symbol} {rep.compared}" for rep in reports)
     lines.append("")
+    lines.append(f"Days compared (data on both sides): {total} ({per_symbol})")
     if findings:
         lines.append(f"Findings ({len(findings)}):")
-        lines.extend(f"  {f}" for f in findings)
+        lines.extend(f"  {f.message}" for f in findings)
     else:
-        lines.append("No findings: the cache matches the reference.")
+        lines.append(f"No findings: the cache matches the reference over {total} compared day(s).")
     return "\n".join(lines) + "\n"
 
 
 def render_json(reports: Sequence[SymbolReport]) -> dict[str, Any]:
     return {
         "failed": any(r.failed for r in reports),
-        "findings": [f for r in reports for f in r.findings],
+        "compared": sum(r.compared for r in reports),
+        "findings": [f.as_json() for r in reports for f in r.findings],
         "symbols": [r.as_json() for r in reports],
     }
