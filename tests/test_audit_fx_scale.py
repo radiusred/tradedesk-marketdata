@@ -4,6 +4,7 @@ The audit script lives in ``scripts/`` (it's an operator tool, not a public
 module) so we import it through a path hack — the same approach the script
 itself uses to ship as a single-file tool.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -55,9 +56,9 @@ def _write_day(cache: Path, symbol: str, year: int, month: int, day: int, close:
 
 def test_envelope_flags_high_and_low(audit_mod, tmp_path, capsys):
     cache = tmp_path / "cache"
-    _write_day(cache, "NZDUSD", 2024, 1, 2, 0.65)        # ok
-    _write_day(cache, "NZDUSD", 2024, 1, 3, 65000.0)     # hi (×100000 corruption)
-    _write_day(cache, "NZDUSD", 2024, 1, 4, 0.001)       # lo (sub-envelope)
+    _write_day(cache, "NZDUSD", 2024, 1, 2, 0.65)  # ok
+    _write_day(cache, "NZDUSD", 2024, 1, 3, 65000.0)  # hi (×100000 corruption)
+    _write_day(cache, "NZDUSD", 2024, 1, 4, 0.001)  # lo (sub-envelope)
 
     sys.argv = ["audit_fx_scale.py", "NZDUSD", "--cache-dir", str(cache)]
     rc = audit_mod.main()

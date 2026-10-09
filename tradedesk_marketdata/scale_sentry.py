@@ -42,11 +42,7 @@ class ScaleDiscontinuityError(RuntimeError):
 
 def _daily_bid_path(cache_dir: Path, symbol: str, day: date) -> Path:
     return (
-        cache_dir
-        / symbol
-        / f"{day.year}"
-        / f"{day.month - 1:02d}"
-        / f"{day.day:02d}_bid.csv.zst"
+        cache_dir / symbol / f"{day.year}" / f"{day.month - 1:02d}" / f"{day.day:02d}_bid.csv.zst"
     )
 
 

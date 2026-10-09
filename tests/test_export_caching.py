@@ -309,9 +309,7 @@ def test_reexport_self_heals_leftover_bi5_dir_for_cached_day(monkeypatch, tmp_pa
     ask_bytes_before = ask_csv.read_bytes()
 
     # Leftover .bi5 day-dir from a run interrupted before deleting its bi5 files.
-    day_dir = (
-        cache_dir / "EURUSD" / f"{start.year}" / f"{start.month - 1:02d}" / f"{start.day:02d}"
-    )
+    day_dir = cache_dir / "EURUSD" / f"{start.year}" / f"{start.month - 1:02d}" / f"{start.day:02d}"
     day_dir.mkdir(parents=True, exist_ok=True)
     (day_dir / "00h_ticks.bi5").write_bytes(b"leftover")
     (day_dir / "01h_ticks.bi5").write_bytes(b"leftover")
