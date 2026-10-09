@@ -412,12 +412,16 @@ check below.
 - **The month-join level check.** When a month file is decoded, its first
   trading day's close is compared with the last accepted close before it: the
   previous month's in the same run, or the nearest committed day in the
-  cache. If the larger is more than `1 + max_month_join_step` times the
-  smaller, the month is refused. The refusal is named in the log and the
-  end-of-run summary (`refused=N`), and the days the month feeds stay
-  uncommitted. A refused month is never a reference, so a substitution
-  lasting several months is refused until the level returns. Excluded days
-  are left out on both sides.
+  cache, as long as that close is at most seven days before. A join after a
+  longer gap (a missing month, a holiday run) is not checked, because over
+  weeks of missing data a real market can move further than any threshold
+  that still catches a substitution. If the larger is more than
+  `1 + max_month_join_step` times the smaller, the month is refused. The
+  refusal is named in the log and the end-of-run summary (`refused=N`), and
+  the days the month feeds stay uncommitted. A refused month is never a
+  reference, but it does count as data for the gap: a substitution lasting
+  several months is compared with the last accepted level until the level
+  returns. Excluded days are left out on both sides.
 
   The check is HistData's own guard, distinct from the framework's scale
   sentry. The sentry compares a day with its neighbours already in the

@@ -297,6 +297,10 @@ def load_map(path: Path | None = None) -> tuple[dict[str, HistDataInstrument], H
     return out, settings
 
 
+# The month-join level check compares a month only with a close at most this
+# many days before its first trading day; after a longer gap it does not check.
+JOIN_GAP_DAYS = 7
+
 # The shipped symbol map, as loaded.
 HISTDATA_SYMBOLS: dict[str, HistDataInstrument] = load_symbol_map()
 
@@ -646,6 +650,8 @@ class _HistDataRun(SourceRun):
         self.refused_months: list[YearMonth] = []
         # The last accepted close, for the month-join level check: (day, bid close).
         self.reference: tuple[date, float] | None = None
+        # The last trading day of the last month the check saw, accepted or refused.
+        self.last_seen: date | None = None
         self.counts = dict.fromkeys(
             ("from_cache", "downloaded", "unavailable", "before_first", "failed", "refused"), 0
         )
@@ -791,6 +797,8 @@ class _HistDataRun(SourceRun):
 
     # --- the month-join level check ---
     #
+    # JOIN_GAP_DAYS (module level) bounds how far back a reference may be.
+    #
     # The provider's own guard against a substituted series: HistData has served
     # another instrument's levels under a symbol for years at a time. It compares
     # a month with the HistData data before it, even in a fresh cache. The
@@ -806,11 +814,11 @@ class _HistDataRun(SourceRun):
         return [(d, c) for d, c in closes if self.inst.excluded(d) is None]
 
     def _cache_reference(self, before: date) -> tuple[date, float] | None:
-        """The last close of the nearest committed day in the 7 days before ``before``."""
+        """The nearest committed day's last close in the ``JOIN_GAP_DAYS`` before ``before``."""
         cache_dir = self.ctx.cache_dir
         if cache_dir is None:
             return None
-        for back in range(1, 8):
+        for back in range(1, JOIN_GAP_DAYS + 1):
             day = before - timedelta(days=back)
             if self.inst.excluded(day) is not None:
                 continue
@@ -823,19 +831,34 @@ class _HistDataRun(SourceRun):
     def _level_check(self, ym: YearMonth, ticks: pd.DataFrame) -> bool:
         """Whether a month's level joins the last accepted close; False refuses it.
 
-        The month's first trading day's close is compared with the last close
-        of the last month accepted in this run, or, failing that, of the
-        nearest committed day in the cache. When the larger is more than
-        ``1 + max_month_join_step`` times the smaller, the month is refused. A
-        refused month is never a reference, so a substitution lasting several
-        months is refused until the level returns. Days in an exclusion span
-        are left out on both sides.
+        The month's first trading day's close is compared with a reference:
+
+        - the last accepted close in this run, when the data runs on without a
+          gap: the previous month's last trading day, accepted or refused, is
+          within ``JOIN_GAP_DAYS`` of this first day. A refused month is never
+          a reference itself, so a substitution lasting several months is
+          compared with the last accepted level until the level returns;
+        - otherwise, the nearest committed day in the cache within
+          ``JOIN_GAP_DAYS`` before this first day.
+
+        When the larger is more than ``1 + max_month_join_step`` times the
+        smaller, the month is refused. Days in an exclusion span are left out
+        on both sides.
+
+        A join after a longer gap (a missing or failed month, a holiday run, a
+        new year after a long close, the start of a run with nothing cached
+        just before it) has no reference and is not checked: across weeks of
+        missing data a real market can move further than any threshold that
+        still catches a substitution, so a stale close would refuse genuine
+        data. Such a month is accepted and becomes the reference for the next.
         """
         closes = self._closes(ticks)
         if not closes:
             return True
         day, close = closes[0]
-        ref = self.reference or self._cache_reference(day)
+        joined = self.last_seen is not None and (day - self.last_seen).days <= JOIN_GAP_DAYS
+        self.last_seen = closes[-1][0]
+        ref = self.reference if joined and self.reference else self._cache_reference(day)
         if ref is not None and close > 0 and ref[1] > 0:
             ratio = max(close / ref[1], ref[1] / close)
             if ratio > 1 + self.max_step:

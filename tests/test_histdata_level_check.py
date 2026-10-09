@@ -114,6 +114,62 @@ def test_a_normal_join_passes(monkeypatch, tmp_path):
     assert set(_weekdays(date(2015, 1, 5), date(2015, 2, 26))) <= set(days)
 
 
+def test_a_join_after_a_missing_month_is_not_checked(monkeypatch, tmp_path, caplog):
+    # January ~100, no February file at all, March ~180: weeks apart, a real
+    # market can move that far; March must not be refused against January.
+    _feed(
+        monkeypatch,
+        [
+            (date(2015, 1, 5), date(2015, 1, 30), 100.0),
+            (date(2015, 3, 2), date(2015, 3, 31), 180.0),
+        ],
+    )
+    cache = tmp_path / "cache"
+
+    with caplog.at_level("INFO"):
+        _export(cache, date(2015, 1, 5), date(2015, 3, 30))
+
+    assert "refusing HistData month" not in caplog.text and "refused=0" in caplog.text
+    days = _committed(cache, date(2015, 3, 2), date(2015, 3, 30))
+    assert set(_weekdays(date(2015, 3, 2), date(2015, 3, 30))) <= set(days)
+
+
+def test_a_join_after_a_year_end_holiday_run_is_not_checked(monkeypatch, tmp_path, caplog):
+    # December ticks stop on the 18th, January's start on the 5th: an 18-day gap.
+    _feed(
+        monkeypatch,
+        [
+            (date(2014, 12, 1), date(2014, 12, 18), 100.0),
+            (date(2015, 1, 5), date(2015, 1, 30), 180.0),
+        ],
+    )
+    cache = tmp_path / "cache"
+
+    with caplog.at_level("INFO"):
+        _export(cache, date(2014, 12, 1), date(2015, 1, 29))
+
+    assert "refusing HistData month" not in caplog.text and "refused=0" in caplog.text
+    days = _committed(cache, date(2015, 1, 5), date(2015, 1, 29))
+    assert set(_weekdays(date(2015, 1, 5), date(2015, 1, 29))) <= set(days)
+
+
+def test_a_join_within_seven_days_across_a_year_end_is_checked(monkeypatch, tmp_path, caplog):
+    # Ticks to Wednesday 2014-12-31, then 0.26x from Friday 2015-01-02: checked.
+    _feed(
+        monkeypatch,
+        [
+            (date(2014, 12, 1), date(2014, 12, 31), 10000.0),
+            (date(2015, 1, 2), date(2015, 1, 30), 2600.0),
+        ],
+    )
+    cache = tmp_path / "cache"
+
+    with caplog.at_level("INFO"):
+        _export(cache, date(2014, 12, 1), date(2015, 1, 29))
+
+    assert "refusing HistData month 2015-01" in caplog.text
+
+
 def test_the_cache_is_the_reference_when_the_previous_month_is_not_fetched(monkeypatch, tmp_path):
     fetch = _feed(
         monkeypatch,
