@@ -1,8 +1,9 @@
-"""Write-time scale-discontinuity sentry for the Dukascopy daily candle cache.
+"""Write-time scale-discontinuity sentry for the daily candle cache.
 
-A Dukascopy `tradedesk-md-export` run applies a single ``--price-divisor`` to
-every tick it decodes.  If the operator re-runs the exporter for a later date
-range with a *different* divisor, the resulting daily CSVs in
+A `tradedesk-md-export` run applies a single price scale to every tick it
+decodes (a source's ``--price-divisor``, or its per-symbol scale).  If the
+operator re-runs the exporter for a later date range with a *different* scale,
+or fills a range from a source whose scale disagrees, the resulting daily CSVs in
 ``cache_dir / SYMBOL / YYYY / MM / DD_{bid,ask}.csv.zst`` end up at a different
 scale to the bulk of the cache.  Downstream backtests that assume one scale
 silently produce wrong PnL across the boundary.

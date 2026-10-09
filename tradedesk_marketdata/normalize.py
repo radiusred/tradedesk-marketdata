@@ -1,5 +1,5 @@
 """
-Normalize Dukascopy cache daily candle files with incorrect price scaling.
+Normalize cache daily candle files with incorrect price scaling.
 
 Detects days where cached prices are off by a power of ten compared to the
 expected real-price range for the instrument, and corrects them in-place by
@@ -26,7 +26,7 @@ same release that introduced this module.
 Both classes of error reduce to the same shape: every OHLC value on the
 affected day is too large or too small by an integer power of ten.  This
 module detects that case and applies the inverse factor in-place without
-re-downloading data from Dukascopy.  Days where the price already falls
+fetching the data again.  Days where the price already falls
 inside the expected range are left untouched.
 """
 
@@ -84,7 +84,7 @@ _INDEX_RANGES: dict[str, tuple[float, float]] = {
     "AUSIDXAUD": (3_000.0, 12_000.0),  # ASX 200: ~4000-9000
 }
 # Crude oil and energy commodities quoted in USD per barrel (~20–200 range).
-# LIGHTCMDUSD is Dukascopy's WTI light-sweet crude contract; treat identically.
+# LIGHTCMDUSD is the WTI light-sweet crude symbol; treat identically.
 _CRUDE_OIL = frozenset({"BRENTCMDUSD", "WTIOILUSD", "USOILUSD", "LIGHTCMDUSD"})
 # COMEX copper futures quoted in USD/lb. Historical envelope $0.50 (1999) to
 # $6.40 (2026-04 spike). Without an explicit band, the standard FX default
@@ -336,7 +336,7 @@ def normalize_cache(
     """Normalize all symbols (or a specified subset) in *cache_dir*.
 
     Args:
-        cache_dir: Root of the Dukascopy cache directory.
+        cache_dir: Root of the cache directory.
         symbols: Symbols to process; defaults to every subdirectory.
         dry_run: If ``True``, no files are modified.
 

@@ -73,7 +73,7 @@ All contributions must pass with zero type errors.
 - HistData.com is a free service: keep its requests strictly sequential per
   instrument (one month zip per request, with a pause between months) and
   never parallelise them within a symbol. Tests must not touch either network;
-  stub `histdata._fetch_month_zip` or the session as the existing tests do.
+  stub `sources.histdata._fetch_month_zip` or a source's session as the existing tests do.
 - When exporter, cache-normalization, or probe logic changes, rerun the
   maintainer audit scripts in `scripts/` against a populated cache:
   `dukascopy_audit.py` for local gap/DST/spread/stale checks and
