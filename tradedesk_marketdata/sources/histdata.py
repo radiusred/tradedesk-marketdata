@@ -8,9 +8,10 @@ HistData serves one "Generic ASCII" tick zip per instrument-month, with bid and
 ask on every tick, so an instrument's whole history is a few hundred requests
 rather than one request per hour.
 
-- **Unit:** one month file. Its month is an EST month, so it covers UTC
-  [YYYY-MM-01 05:00, next month 01 05:00); a UTC day needs one file, except the
-  1st of a month, whose first five hours are in the previous month's file
+- **Unit:** one month file. Its month is a month of HistData's own stamps, so
+  it covers UTC [YYYY-MM-01 04:00 or 05:00, next month 01 04:00 or 05:00); a
+  UTC day needs one file, except the 1st of a month, whose first hours are in
+  the previous month's file
   (``_months_for_day``). Months whose days are all committed are not planned.
 - **Fetch:** scrape the month page for its one-off download token, then POST
   the download form (``_fetch_month_zip``), strictly one month at a time with a
@@ -30,8 +31,8 @@ Tick file format (``DAT_ASCII_{PAIR}_T_{YYYYMM}.csv``), one tick per line::
 
     20150101 180000497,2055.000000,2055.250000,0
 
-``YYYYMMDD HHMMSSNNN`` in EST with no daylight-saving adjustment (a fixed
-UTC-5), bid, ask, and a volume that is always 0.
+``YYYYMMDD HHMMSSNNN`` in HistData's local stamp (see ``ERA_SWITCH``: not the
+fixed UTC-5 HistData describes), bid, ask, and a volume that is always 0.
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ from html.parser import HTMLParser
 from importlib import resources
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -92,11 +94,31 @@ UA = (
 # Seconds to wait between two month downloads for one instrument.
 REQUEST_INTERVAL = 2.0
 
-# HistData timestamps are EST without daylight saving: always UTC-5.
-# TODO(#82): HistData's "EST" is not a fixed UTC-5. The per-era rule replaces
-# this constant inside _utc_to_est, _est_to_utc and _est_series_to_utc, its
-# only readers; every timestamp conversion in this module goes through them.
-EST_OFFSET = timedelta(hours=5)
+# HistData's timestamps. HistData describes them as "EST without daylight
+# saving", a fixed UTC-5, and that is wrong for about seven months a year:
+# measured against Dukascopy, summer days match only shifted by an hour, and the
+# shift follows a daylight-saving calendar that depends on the provider HistData
+# took the data from. Up to the provider switch the stamps are New York local
+# time, US daylight saving included; from it on they are Zurich local time
+# minus six hours, so they follow EU daylight saving. Both rules are UTC-5 in
+# winter. Every conversion in this module goes through _utc_to_est,
+# _est_to_utc and _est_series_to_utc.
+#
+# The switch: the first stamp of the second era. In SPXUSD's 2018-12 file the
+# 0.25-point price grid of the first provider ends with Friday 2018-12-14's last
+# tick and is gone from Sunday 2018-12-16's first; the session's Friday close
+# and Sunday open times change at the same point.
+ERA_SWITCH = datetime(2018, 12, 16)
+_NEW_YORK = ZoneInfo("America/New_York")
+_ZURICH = ZoneInfo("Europe/Zurich")
+_ZURICH_SHIFT = timedelta(hours=6)  # second era: stamp = Zurich local time - 6 h
+# ERA_SWITCH in UTC; a December stamp is UTC-5 under both rules.
+_ERA_SWITCH_UTC = ERA_SWITCH.replace(tzinfo=UTC) + timedelta(hours=5)
+# A stamp in a local time that does not exist (the spring-forward hour) is
+# moved forward by the hour the clocks skip; one that exists twice (the
+# fall-back hour) is read as its first occurrence. Both fall in the weekend
+# market close in both eras, and both match zoneinfo's fold=0.
+_DST_GAP = timedelta(hours=1)
 
 _SESSION = requests.Session()
 _SESSION.headers.update({"User-Agent": UA})
@@ -272,9 +294,10 @@ def lookup(symbol: str, symbols: dict[str, HistDataInstrument] | None = None) ->
 # Months and days
 # ---------------------------------------------------------------------------
 #
-# A HistData month file covers one EST month, i.e. UTC [YYYY-MM-01 05:00,
-# next month 01 05:00). A UTC day therefore needs one file, except the 1st of a
-# month, whose first five hours are in the previous month's file.
+# A HistData month file covers one month of its own stamps, i.e. UTC
+# [YYYY-MM-01 04:00 or 05:00, next month 01 04:00 or 05:00), depending on
+# daylight saving. A UTC day therefore needs one file, except the 1st of a
+# month, whose first four or five hours are in the previous month's file.
 
 
 def _next_month(ym: YearMonth) -> YearMonth:
@@ -283,18 +306,37 @@ def _next_month(ym: YearMonth) -> YearMonth:
 
 
 def _utc_to_est(ts_utc: datetime) -> datetime:
-    """A UTC time in HistData's timestamp convention."""
-    return ts_utc - EST_OFFSET
+    """A UTC time as a HistData stamp (naive), under the era it falls in."""
+    if ts_utc < _ERA_SWITCH_UTC:
+        return ts_utc.astimezone(_NEW_YORK).replace(tzinfo=None)
+    return ts_utc.astimezone(_ZURICH).replace(tzinfo=None) - _ZURICH_SHIFT
 
 
 def _est_to_utc(est: datetime) -> datetime:
-    """A HistData timestamp (naive, its own convention) as a UTC time."""
-    return est.replace(tzinfo=UTC) + EST_OFFSET
+    """A HistData stamp (naive) as a UTC time, under its era's rule."""
+    local = (
+        est.replace(tzinfo=_NEW_YORK)
+        if est < ERA_SWITCH
+        else (est + _ZURICH_SHIFT).replace(tzinfo=_ZURICH)
+    )
+    return local.astimezone(UTC)
+
+
+def _localize(local: pd.Series, zone: ZoneInfo) -> pd.Series:
+    flags = np.ones(len(local), dtype=bool)  # a repeated local time: its first occurrence
+    return local.dt.tz_localize(zone, ambiguous=flags, nonexistent=_DST_GAP).dt.tz_convert("UTC")
 
 
 def _est_series_to_utc(est: pd.Series) -> pd.DatetimeIndex:
-    """HistData timestamps (naive) as a UTC index: the vectorised ``_est_to_utc``."""
-    return pd.DatetimeIndex((est + EST_OFFSET).dt.tz_localize("UTC"))
+    """HistData stamps (naive) as a UTC index: the vectorised ``_est_to_utc``."""
+    first = est < ERA_SWITCH
+    parts = []
+    if first.any():
+        parts.append(_localize(est[first], _NEW_YORK))
+    if not first.all():
+        parts.append(_localize(est[~first] + _ZURICH_SHIFT, _ZURICH))
+    utc = pd.concat(parts).reindex(est.index) if parts else est.dt.tz_localize("UTC")
+    return pd.DatetimeIndex(utc)
 
 
 def _month_of(ts_utc: datetime) -> YearMonth:
@@ -690,7 +732,7 @@ class _HistDataRun(SourceRun):
     def _ingest(self, ym: YearMonth, ticks: pd.DataFrame) -> pd.DataFrame | None:
         """Keep the ticks inside the file's own month and track the data's extent."""
         self.status[ym] = "ok"
-        # Each file owns exactly its EST month, so a stray tick outside it can
+        # Each file owns exactly its own stamp month, so a stray tick outside it can
         # never double up with the neighbouring file's ticks for the same day.
         span_start, span_end = _month_span(ym)
         lo, hi = ticks.index.searchsorted([span_start, span_end])
