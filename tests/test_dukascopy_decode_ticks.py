@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-import tradedesk_marketdata.export as ex
+import tradedesk_marketdata.sources.dukascopy as dk
 
 
 def _bi5_float_records(*rows: tuple[int, float, float, float, float]) -> bytes:
@@ -34,7 +34,7 @@ def test_decode_ticks_float_decodes_values_and_timestamps() -> None:
         (500, 1.2350, 1.2346, 11.0, 13.0),
     )
 
-    ticks = ex._decode_ticks(
+    ticks = dk._decode_ticks(
         hour_start,
         comp,
         price_format="float",
@@ -67,7 +67,7 @@ def test_decode_ticks_int_applies_divisor_scaling() -> None:
         (250, 123500, 123460, 11.0, 13.0),
     )
 
-    ticks = ex._decode_ticks(
+    ticks = dk._decode_ticks(
         hour_start,
         comp,
         price_format="int",
@@ -98,7 +98,7 @@ def test_decode_ticks_raises_on_non_multiple_of_20_payload() -> None:
     comp = lzma.compress(b"x" * 21)
 
     with pytest.raises(ValueError, match="not multiple of 20"):
-        ex._decode_ticks(
+        dk._decode_ticks(
             hour_start,
             comp,
             price_format="float",
@@ -111,7 +111,7 @@ def test_decode_ticks_invalid_price_format_raises() -> None:
     comp = _bi5_float_records((0, 1.0, 1.0, 1.0, 1.0))
 
     with pytest.raises(ValueError, match="price_format must be"):
-        ex._decode_ticks(
+        dk._decode_ticks(
             hour_start,
             comp,
             price_format="nope",

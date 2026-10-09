@@ -14,6 +14,7 @@ import pytest
 from histdata_fixtures import FakeFetcher, est_line, month_zip, weekday_lines, zips_by_month
 
 import tradedesk_marketdata.export as ex
+import tradedesk_marketdata.sources.dukascopy as dk
 from tradedesk_marketdata import histdata as hd
 from tradedesk_marketdata.cancel import cancellation
 
@@ -378,12 +379,12 @@ def test_histdata_day_files_match_dukascopy_day_files_for_identical_ticks(
             if hour_start <= ts < hour_start + timedelta(hours=1)
         ]
 
-    monkeypatch.setattr(ex, "_download_bi5", fake_download)
-    monkeypatch.setattr(ex, "_probe_price_format", lambda *_: "int")
-    monkeypatch.setattr(ex, "_decode_ticks", fake_decode)
+    monkeypatch.setattr(dk, "_download_bi5", fake_download)
+    monkeypatch.setattr(dk, "_probe_price_format", lambda *_: "int")
+    monkeypatch.setattr(dk, "_decode_ticks", fake_decode)
     duka_cache = tmp_path / "duka"
     day_start = datetime(day.year, day.month, day.day, tzinfo=UTC)
-    ex.export_range(
+    dk.export_range(
         symbol="EURUSD",
         start_utc=day_start,
         end_utc_inclusive=day_start,

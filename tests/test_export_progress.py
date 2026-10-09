@@ -29,19 +29,20 @@ class FakeProgress:
 
 def test_export_range_reports_download_and_resample_progress(tmp_path, monkeypatch):
     from tradedesk_marketdata import export as ex
+    from tradedesk_marketdata.sources import dukascopy as dk
 
     start = datetime(2025, 1, 1, 0, 0, tzinfo=UTC)
     hours = [start + timedelta(hours=i) for i in range(3)]
-    monkeypatch.setattr(ex, "_iter_hours", lambda *_args, **_kwargs: iter(hours))
-    monkeypatch.setattr(ex, "DOWNLOAD_THREADS_PER_INSTRUMENT", 1)
+    monkeypatch.setattr(dk, "_iter_hours", lambda *_args, **_kwargs: iter(hours))
+    monkeypatch.setattr(dk, "DOWNLOAD_THREADS_PER_INSTRUMENT", 1)
 
-    monkeypatch.setattr(ex, "_download_bi5", lambda *_args, **_kwargs: b"x")
-    monkeypatch.setattr(ex, "_probe_price_format", lambda *_args, **_kwargs: "float")
+    monkeypatch.setattr(dk, "_download_bi5", lambda *_args, **_kwargs: b"x")
+    monkeypatch.setattr(dk, "_probe_price_format", lambda *_args, **_kwargs: "float")
 
     def _fake_decode_ticks(hour_start, _compressed, *, price_format, price_divisor):
         return [ex.Tick(ts=hour_start, bid=1.0, ask=1.0, bid_vol=1.0, ask_vol=1.0)]
 
-    monkeypatch.setattr(ex, "_decode_ticks", _fake_decode_ticks)
+    monkeypatch.setattr(dk, "_decode_ticks", _fake_decode_ticks)
 
     def _fake_ticks_to_candles(_ticks, *, resample_rule, price_side):
         idx = pd.DatetimeIndex([start], tz="UTC")
@@ -55,7 +56,7 @@ def test_export_range_reports_download_and_resample_progress(tmp_path, monkeypat
     prog = FakeProgress()
     out_dir = tmp_path / "out"
 
-    out_csv = ex.export_range(
+    out_csv = dk.export_range(
         symbol="EURUSD",
         start_utc=start,
         end_utc_inclusive=start,

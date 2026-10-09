@@ -4,7 +4,7 @@ from unittest.mock import Mock
 import pytest
 import requests
 
-import tradedesk_marketdata.export as ex
+import tradedesk_marketdata.sources.dukascopy as dk
 
 
 class DummyResponse:
@@ -32,9 +32,9 @@ def test_404_returns_none_and_does_not_cache(cache_dir: Path, monkeypatch):
     def fake_get(*_, **__):
         return DummyResponse(status_code=404, content=b"")
 
-    monkeypatch.setattr(ex._SESSION, "get", fake_get)
+    monkeypatch.setattr(dk._SESSION, "get", fake_get)
 
-    result = ex._download_bi5(
+    result = dk._download_bi5(
         url="http://example.com/data.bi5",
         cache_path=cache_dir / "file.bi5",
         retries=1,
@@ -48,11 +48,11 @@ def test_200_zero_length_body_is_cached(cache_dir: Path, monkeypatch):
     def fake_get(*_, **__):
         return DummyResponse(status_code=200, content=b"")
 
-    monkeypatch.setattr(ex._SESSION, "get", fake_get)
+    monkeypatch.setattr(dk._SESSION, "get", fake_get)
 
     cache_path = cache_dir / "file.bi5"
 
-    result = ex._download_bi5(
+    result = dk._download_bi5(
         url="http://example.com/data.bi5",
         cache_path=cache_path,
         retries=1,
@@ -69,9 +69,9 @@ def test_cached_empty_file_short_circuits_download(cache_dir: Path, monkeypatch)
     cache_path.write_bytes(b"")
 
     get_mock = Mock()
-    monkeypatch.setattr(ex._SESSION, "get", get_mock)
+    monkeypatch.setattr(dk._SESSION, "get", get_mock)
 
-    result = ex._download_bi5(
+    result = dk._download_bi5(
         url="http://example.com/data.bi5",
         cache_path=cache_path,
         retries=1,
@@ -85,11 +85,11 @@ def test_tiny_payload_is_treated_as_no_data_and_cached(cache_dir: Path, monkeypa
     def fake_get(*_, **__):
         return DummyResponse(status_code=200, content=b"123")
 
-    monkeypatch.setattr(ex._SESSION, "get", fake_get)
+    monkeypatch.setattr(dk._SESSION, "get", fake_get)
 
     cache_path = cache_dir / "file.bi5"
 
-    result = ex._download_bi5(
+    result = dk._download_bi5(
         url="http://example.com/data.bi5",
         cache_path=cache_path,
         retries=1,
@@ -110,11 +110,11 @@ def test_retry_then_success_caches_payload(cache_dir: Path, monkeypatch):
             raise requests.ConnectionError("temporary failure")
         return DummyResponse(status_code=200, content=payload)
 
-    monkeypatch.setattr(ex._SESSION, "get", fake_get)
+    monkeypatch.setattr(dk._SESSION, "get", fake_get)
 
     cache_path = cache_dir / "file.bi5"
 
-    result = ex._download_bi5(
+    result = dk._download_bi5(
         url="http://example.com/data.bi5",
         cache_path=cache_path,
         retries=2,
@@ -133,11 +133,11 @@ def test_exhausted_retries_return_unavailable_not_none(cache_dir: Path, monkeypa
     def fake_get(*_, **__):
         raise requests.ConnectionError("synthetic timeout")
 
-    monkeypatch.setattr(ex._SESSION, "get", fake_get)
-    monkeypatch.setattr(ex, "RETRY_BASE_DELAY", 0.01)
+    monkeypatch.setattr(dk._SESSION, "get", fake_get)
+    monkeypatch.setattr(dk, "RETRY_BASE_DELAY", 0.01)
 
-    result = ex._download_bi5("http://example.com/x.bi5", cache_dir / "x.bi5", retries=2)
+    result = dk._download_bi5("http://example.com/x.bi5", cache_dir / "x.bi5", retries=2)
 
-    assert isinstance(result, ex.Unavailable)
+    assert isinstance(result, dk.Unavailable)
     assert "synthetic timeout" in result.error
     assert not (cache_dir / "x.bi5").exists()

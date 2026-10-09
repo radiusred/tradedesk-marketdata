@@ -3,7 +3,7 @@ from pathlib import Path
 
 import requests
 
-import tradedesk_marketdata.export as ex
+import tradedesk_marketdata.sources.dukascopy as dk
 
 
 class BackoffResponse:
@@ -44,9 +44,9 @@ def test_exponential_backoff_timing(monkeypatch, tmp_path: Path):
     def fake_get(*_, **__):
         return mock_resp
 
-    monkeypatch.setattr(ex._SESSION, "get", fake_get)
+    monkeypatch.setattr(dk._SESSION, "get", fake_get)
 
-    result = ex._download_bi5(
+    result = dk._download_bi5(
         url="http://example.com/data.bi5",
         cache_path=tmp_path / "file.bi5",
         retries=3,
@@ -79,16 +79,16 @@ def test_backoff_resets_on_success(monkeypatch, tmp_path: Path):
             resp = BackoffResponse(attempts_before_success=1)
         return resp
 
-    monkeypatch.setattr(ex._SESSION, "get", fake_get)
+    monkeypatch.setattr(dk._SESSION, "get", fake_get)
 
     # First download: should retry once
     start1 = time.time()
-    ex._download_bi5("http://example.com/1.bi5", tmp_path / "1.bi5", retries=2)
+    dk._download_bi5("http://example.com/1.bi5", tmp_path / "1.bi5", retries=2)
     elapsed1 = time.time() - start1
 
     # Second download: should succeed immediately (no accumulated backoff)
     start2 = time.time()
-    ex._download_bi5("http://example.com/2.bi5", tmp_path / "2.bi5", retries=2)
+    dk._download_bi5("http://example.com/2.bi5", tmp_path / "2.bi5", retries=2)
     elapsed2 = time.time() - start2
 
     assert 0.4 < elapsed1 < 0.9  # One backoff

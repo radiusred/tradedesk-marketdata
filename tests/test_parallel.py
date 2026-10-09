@@ -5,8 +5,8 @@ Tests for parallel.py — _export_worker and run_parallel_exports.
 from datetime import UTC, datetime
 from pathlib import Path
 
-import tradedesk_marketdata.export as ex
 import tradedesk_marketdata.parallel as par
+import tradedesk_marketdata.sources.dukascopy as dk
 from tradedesk_marketdata.parallel import ExportResult, ExportTask, _export_worker
 
 # ---------------------------------------------------------------------------
@@ -35,7 +35,7 @@ def test_export_worker_success_collects_both_output_csvs(monkeypatch, tmp_path):
     bid = tmp_path / "EURUSD_1MIN_bid.csv"
     ask = tmp_path / "EURUSD_1MIN_ask.csv"
 
-    monkeypatch.setattr(ex, "export_range", lambda **_: (bid, ask))
+    monkeypatch.setattr(dk, "export_range", lambda **_: (bid, ask))
 
     result = _export_worker(_task(tmp_path=tmp_path))
 
@@ -48,7 +48,7 @@ def test_export_worker_filters_none_from_output_csvs(monkeypatch, tmp_path):
     # One side produces no data (e.g. all-empty frames).
     bid = tmp_path / "EURUSD_1MIN_bid.csv"
 
-    monkeypatch.setattr(ex, "export_range", lambda **_: (bid, None))
+    monkeypatch.setattr(dk, "export_range", lambda **_: (bid, None))
 
     result = _export_worker(_task(tmp_path=tmp_path))
 
@@ -60,7 +60,7 @@ def test_export_worker_returns_failure_on_exception(monkeypatch, tmp_path):
     def bad_export(**_):
         raise RuntimeError("network error")
 
-    monkeypatch.setattr(ex, "export_range", bad_export)
+    monkeypatch.setattr(dk, "export_range", bad_export)
 
     result = _export_worker(_task(tmp_path=tmp_path))
 
@@ -117,7 +117,6 @@ def test_export_worker_forwards_timeouts_and_retries(monkeypatch, tmp_path):
     leaves export_range's own defaults in force."""
     from datetime import UTC, datetime
 
-    import tradedesk_marketdata.export as ex
     import tradedesk_marketdata.parallel as par
 
     seen: list[dict] = []
@@ -126,7 +125,7 @@ def test_export_worker_forwards_timeouts_and_retries(monkeypatch, tmp_path):
         seen.append(kwargs)
         return (None, None)
 
-    monkeypatch.setattr(ex, "export_range", fake_export_range)
+    monkeypatch.setattr(dk, "export_range", fake_export_range)
 
     common = dict(
         symbol="EURUSD",
@@ -157,7 +156,7 @@ def test_histdata_task_runs_the_histdata_export(monkeypatch, tmp_path: Path) -> 
         raise AssertionError("the Dukascopy export must not run for a histdata task")
 
     monkeypatch.setattr(hd, "export_range_histdata", fake_histdata)
-    monkeypatch.setattr(ex, "export_range", no_dukascopy)
+    monkeypatch.setattr(dk, "export_range", no_dukascopy)
 
     task = ExportTask(
         symbol="USA500IDXUSD",
