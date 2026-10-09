@@ -15,8 +15,8 @@ from histdata_fixtures import FakeFetcher, est_line, month_zip, weekday_lines, z
 
 import tradedesk_marketdata.export as ex
 import tradedesk_marketdata.sources.dukascopy as dk
-from tradedesk_marketdata import histdata as hd
 from tradedesk_marketdata.cancel import cancellation
+from tradedesk_marketdata.sources import histdata as hd
 
 SYMBOL = "USA500IDXUSD"
 

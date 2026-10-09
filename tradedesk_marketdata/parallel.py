@@ -17,7 +17,9 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from . import export
 from .cancel import cancellation as _cancellation_event
+from .source import Source
 
 log = logging.getLogger(__name__)
 
@@ -30,13 +32,12 @@ class ExportTask:
     start_utc: datetime
     end_utc_inclusive: datetime
     resample_rule: str | None
-    price_divisor: float
     cache_dir: Path | None
     out: Path
+    source: Source
     commit_partial_after_days: int = 7
     timeout: tuple[float, float] | None = None
     retries: int | None = None
-    source: str = "dukascopy"
 
 
 @dataclass
@@ -51,9 +52,7 @@ class ExportResult:
 
 def _export_worker(task: ExportTask, progress: Progress | None = None) -> ExportResult:
     """Worker function to export a single symbol."""
-    from tradedesk_marketdata.sources.dukascopy import export_range
-
-    # None means "the export module's default", so a task built without the
+    # None means "the framework's default", so a task built without the
     # network settings behaves exactly as before.
     network: dict[str, object] = {}
     if task.timeout is not None:
@@ -62,35 +61,13 @@ def _export_worker(task: ExportTask, progress: Progress | None = None) -> Export
         network["retries"] = task.retries
 
     try:
-        if task.source == "histdata":
-            from tradedesk_marketdata.histdata import export_range_histdata
-
-            bid_csv, ask_csv = export_range_histdata(
-                symbol=task.symbol,
-                start_utc=task.start_utc,
-                end_utc_inclusive=task.end_utc_inclusive,
-                resample_rule=task.resample_rule,
-                cache_dir=task.cache_dir,
-                commit_partial_after_days=task.commit_partial_after_days,
-                out=task.out,
-                progress=progress,
-                **network,  # type: ignore[arg-type]
-            )
-            return ExportResult(
-                symbol=task.symbol,
-                output_csvs=[p for p in (bid_csv, ask_csv) if p is not None],
-                success=True,
-            )
-
-        bid_csv, ask_csv = export_range(
+        bid_csv, ask_csv = export.export_range(
+            source=task.source,
             symbol=task.symbol,
             start_utc=task.start_utc,
             end_utc_inclusive=task.end_utc_inclusive,
             resample_rule=task.resample_rule,
-            price_divisor=task.price_divisor,
             cache_dir=task.cache_dir,
-            probe=False,
-            probe_ticks=0,
             commit_partial_after_days=task.commit_partial_after_days,
             out=task.out,
             progress=progress,
@@ -155,7 +132,7 @@ def run_parallel_exports(
     except KeyboardInterrupt:
         _cancellation_event.set()
         log.warning(
-            "Interrupted - cancelling: queued hours are dropped and in-flight requests "
+            "Interrupted - cancelling: queued units are dropped and in-flight requests "
             "end at their next timeout; press Ctrl-C again to exit without waiting"
         )
         executor.shutdown(wait=False, cancel_futures=True)
