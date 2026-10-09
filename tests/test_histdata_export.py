@@ -1,8 +1,9 @@
 """
-HistData exports through the shared cache: month skipping and idempotency,
-empty and partial days, provenance, first-committed-wins, the scale sentry,
-cancellation, and the equivalence of a HistData day file with the Dukascopy
-one for identical ticks. A stub stands in for the month download throughout.
+HistData exports through the framework: month skipping and idempotency, empty
+and partial days, provenance, first-committed-wins, the scale sentry and
+cancellation. A stub stands in for the month download throughout. That a
+HistData day file is byte-identical to any other source's for the same ticks
+is the conformance suite's job (test_source_conformance.py).
 """
 
 import json
@@ -14,7 +15,6 @@ import pytest
 from histdata_fixtures import FakeFetcher, est_line, month_zip, weekday_lines, zips_by_month
 
 import tradedesk_marketdata.export as ex
-import tradedesk_marketdata.sources.dukascopy as dk
 from tradedesk_marketdata.cancel import cancellation
 from tradedesk_marketdata.sources import histdata as hd
 
@@ -367,74 +367,6 @@ def test_cancel_stops_before_the_next_month(monkeypatch, tmp_path):
     with pytest.raises(KeyboardInterrupt):
         _run(tmp_path / "cache", date(2015, 1, 1), date(2015, 2, 28))
     assert inner.calls == [(2014, 12)]
-
-
-# ---------------------------------------------------------------------------
-# Equivalence with the Dukascopy path (R2)
-# ---------------------------------------------------------------------------
-
-
-def _synthetic_ticks(day: date) -> list[tuple[datetime, int, int]]:
-    """Irregular EURUSD-like ticks over all 24 UTC hours: (utc time, bid, ask) in 1e-5 points."""
-    ticks = []
-    base = datetime(day.year, day.month, day.day, tzinfo=UTC)
-    for i in range(24 * 7):
-        ts = base + timedelta(seconds=i * 514 % 86_400, milliseconds=(i * 37) % 1000)
-        bid = 108_000 + (i * 7919) % 400
-        ticks.append((ts, bid, bid + 3 + i % 5))
-    return sorted(ticks)
-
-
-@pytest.mark.parametrize(
-    "day",
-    [date(2016, 2, 10), date(2016, 2, 1)],  # mid-month; and a day split across two month files
-    ids=["mid-month", "first-of-month"],
-)
-def test_histdata_day_files_match_dukascopy_day_files_for_identical_ticks(
-    monkeypatch, tmp_path, day
-):
-    ticks = _synthetic_ticks(day)
-
-    # Dukascopy path: int32 points divided by --price-divisor 10 -> the cache's pips.
-    def fake_download(url, *, cache_path, **kwargs):
-        return b"fake"
-
-    def fake_decode(hour_start, _comp, *, price_format, price_divisor):
-        return [
-            ex.Tick(ts=ts, bid=b / price_divisor, ask=a / price_divisor, bid_vol=0.0, ask_vol=0.0)
-            for ts, b, a in ticks
-            if hour_start <= ts < hour_start + timedelta(hours=1)
-        ]
-
-    monkeypatch.setattr(dk, "_download_bi5", fake_download)
-    monkeypatch.setattr(dk, "_probe_price_format", lambda *_: "int")
-    monkeypatch.setattr(dk, "_decode_ticks", fake_decode)
-    duka_cache = tmp_path / "duka"
-    day_start = datetime(day.year, day.month, day.day, tzinfo=UTC)
-    dk.export_range(
-        symbol="EURUSD",
-        start_utc=day_start,
-        end_utc_inclusive=day_start,
-        out=tmp_path / "out",
-        price_divisor=10.0,
-        resample_rule=None,
-        cache_dir=duka_cache,
-    )
-
-    # HistData path: the same ticks as decimal quotes in EST month files.
-    lines = [est_line(ts, f"{b / 1e5:.6f}", f"{a / 1e5:.6f}") for ts, b, a in ticks]
-    monkeypatch.setattr(hd, "_fetch_month_zip", FakeFetcher(zips_by_month(lines)))
-    hd_cache = tmp_path / "histdata"
-    _run(hd_cache, day, day, symbol="EURUSD")
-
-    for side in ("bid", "ask"):
-        duka_file = ex._daily_candle_path(duka_cache, "EURUSD", day, side)
-        hd_file = ex._daily_candle_path(hd_cache, "EURUSD", day, side)
-        assert hd_file.relative_to(hd_cache) == duka_file.relative_to(duka_cache)
-        assert hd_file.read_bytes() == duka_file.read_bytes()  # byte-identical zstd CSV
-    candles = ex._load_daily_candles(ex._daily_candle_path(hd_cache, "EURUSD", day, "bid"))
-    assert candles is not None and len(candles) > 100
-    assert candles.index[0] < pd.Timestamp(day_start + timedelta(hours=5))  # the 00-05h UTC part
 
 
 def test_tick_outside_its_month_file_is_ignored(monkeypatch, tmp_path, caplog):
