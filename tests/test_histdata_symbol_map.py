@@ -49,7 +49,15 @@ def test_the_shipped_map_holds_the_25_instruments() -> None:
     )
     assert (shipped["EURUSD"].scale, shipped["EURUSD"].first_month) == (1e4, (2000, 5))
     assert (shipped["USDJPY"].scale, shipped["XAUUSD"].scale) == (1e2, 1e2)
-    assert all(not inst.exclude for inst in shipped.values())  # spans are #83's to ship
+    # The one shipped exclusion span: GRXEUR's Euro Stoxx 50 years.
+    assert [s for s, inst in shipped.items() if inst.exclude] == ["DEUIDXEUR"]
+    assert shipped["DEUIDXEUR"].exclude == (
+        hd.ExcludedSpan(
+            date(2020, 6, 17),
+            date(2023, 12, 5),
+            "GRXEUR carries Euro Stoxx 50 levels, not the DAX",
+        ),
+    )
 
 
 def test_the_shipped_map_marks_the_unconfirmed_scales_unverified() -> None:
@@ -269,3 +277,25 @@ def test_days_in_an_exclusion_span_are_recorded_not_committed(jan_2015, tmp_path
     _export(cache, date(2015, 1, 5), date(2015, 1, 9), symbol_map=lifted)
     assert ex._day_is_committed(cache, "USA500IDXUSD", date(2015, 1, 7))
     assert ex._day_is_committed(cache, "USA500IDXUSD", date(2015, 1, 8))
+
+
+def test_the_shipped_deuidxeur_span_is_honoured(monkeypatch, tmp_path, caplog) -> None:
+    # DAX-like ticks around the span's first day; the shipped map, no --symbol-map.
+    lines = weekday_lines(date(2020, 6, 1), date(2020, 6, 30), price=12300.0)
+    fetch = FakeFetcher(zips_by_month(lines))
+    monkeypatch.setattr(hd, "_fetch_month_zip", fetch)
+    cache = tmp_path / "cache"
+
+    with caplog.at_level("INFO"):
+        _export(cache, date(2020, 6, 15), date(2020, 6, 18), symbol="DEUIDXEUR")
+
+    committed = [
+        d
+        for d in _days(date(2020, 6, 15), date(2020, 6, 18))
+        if ex._day_is_committed(cache, "DEUIDXEUR", d)
+    ]
+    assert committed == [date(2020, 6, 15), date(2020, 6, 16)]
+    excluded = [r for r in _records(cache, "DEUIDXEUR") if r.get("status") == "excluded"]
+    assert [r["day"] for r in excluded] == ["2020-06-17", "2020-06-18"]
+    assert {r["reason"] for r in excluded} == {"GRXEUR carries Euro Stoxx 50 levels, not the DAX"}
+    assert "excluded=2" in caplog.text
