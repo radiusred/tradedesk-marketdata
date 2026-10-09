@@ -4,7 +4,13 @@ from pathlib import Path
 
 import tradedesk_marketdata.cli as cli
 import tradedesk_marketdata.parallel as par
+import tradedesk_marketdata.sources.dukascopy as dk
+from tradedesk_marketdata import sources
 from tradedesk_marketdata.parallel import ExportResult
+
+# One Dukascopy symbol-day: the common argv of the tests that do not care about the source.
+_DK_DAY = ["--source", "dukascopy", "--symbols", "EURUSD", "--from", "2025-07-01"]
+_DK_DAY += ["--to", "2025-07-01"]
 
 
 def test_configure_logging_maps_fatal_to_critical() -> None:
@@ -46,6 +52,8 @@ def test_main_writes_sidecar_for_both_bid_and_ask(monkeypatch, tmp_path: Path) -
 
     rc = cli.main(
         [
+            "--source",
+            "dukascopy",
             "--symbols",
             "EURUSD",
             "--from",
@@ -82,6 +90,8 @@ def test_main_does_not_write_sidecar_when_no_output_csvs(monkeypatch, tmp_path: 
 
     rc = cli.main(  # no --resample or --out
         [
+            "--source",
+            "dukascopy",
             "--symbols",
             "EURUSD",
             "--from",
@@ -101,7 +111,16 @@ def test_parser_network_defaults_match_export_module() -> None:
     import tradedesk_marketdata.export as ex
 
     args = cli.build_parser().parse_args(
-        ["--symbols", "EURUSD", "--from", "2025-07-01", "--to", "2025-07-01"]
+        [
+            "--source",
+            "dukascopy",
+            "--symbols",
+            "EURUSD",
+            "--from",
+            "2025-07-01",
+            "--to",
+            "2025-07-01",
+        ]
     )
     assert args.connect_timeout == ex.DEFAULT_CONNECT_TIMEOUT
     assert args.read_timeout == ex.DEFAULT_READ_TIMEOUT
@@ -119,6 +138,8 @@ def test_main_passes_timeouts_and_retries_to_export_tasks(monkeypatch, tmp_path:
 
     rc = cli.main(
         [
+            "--source",
+            "dukascopy",
             "--symbols",
             "EURUSD",
             "GBPUSD",
@@ -145,14 +166,15 @@ def test_main_passes_timeouts_and_retries_to_export_tasks(monkeypatch, tmp_path:
 def test_main_passes_timeouts_and_retries_to_probe(monkeypatch) -> None:
     seen: dict[str, object] = {}
 
-    def fake_export_range(**kwargs):
-        seen.update(kwargs)
-        return (None, None)
+    def fake_probe(symbol, hours, cache_dir, probe_ticks, price_divisor, **kwargs):
+        seen.update(kwargs, symbol=symbol, probe_ticks=probe_ticks, cache_dir=cache_dir)
 
-    monkeypatch.setattr(cli, "export_range", fake_export_range)
+    monkeypatch.setattr(dk, "_probe", fake_probe)
 
     rc = cli.main(
         [
+            "--source",
+            "dukascopy",
             "--symbols",
             "EURUSD",
             "--from",
@@ -171,7 +193,8 @@ def test_main_passes_timeouts_and_retries_to_probe(monkeypatch) -> None:
     )
 
     assert rc == 0
-    assert seen["probe"] is True
+    assert seen["symbol"] == "EURUSD" and seen["probe_ticks"] == 10
+    assert seen["cache_dir"] is None
     assert seen["timeout"] == (15.0, 90.0)
     assert seen["retries"] == 5
 
@@ -179,7 +202,16 @@ def test_main_passes_timeouts_and_retries_to_probe(monkeypatch) -> None:
 def test_main_rejects_non_positive_timeouts_and_zero_retries() -> None:
     import pytest
 
-    base = ["--symbols", "EURUSD", "--from", "2025-07-01", "--to", "2025-07-01"]
+    base = [
+        "--source",
+        "dukascopy",
+        "--symbols",
+        "EURUSD",
+        "--from",
+        "2025-07-01",
+        "--to",
+        "2025-07-01",
+    ]
     with pytest.raises(SystemExit):
         cli.main(base + ["--read-timeout", "0"])
     with pytest.raises(SystemExit):
@@ -198,7 +230,17 @@ def test_main_waits_for_export_threads_after_interrupt(monkeypatch) -> None:
     monkeypatch.setattr(cli, "_wait_for_export_threads", lambda _log: waited.append(True))
 
     rc = cli.main(
-        ["--symbols", "EURUSD", "--from", "2025-07-01", "--to", "2025-07-01", "--no-cache"]
+        [
+            "--source",
+            "dukascopy",
+            "--symbols",
+            "EURUSD",
+            "--from",
+            "2025-07-01",
+            "--to",
+            "2025-07-01",
+        ]
+        + ["--no-cache"]
     )
 
     assert rc == 130
@@ -232,13 +274,15 @@ def test_wait_for_export_threads_second_interrupt_exits_130(monkeypatch) -> None
 
 
 def test_probe_returns_130_on_interrupt(monkeypatch) -> None:
-    def interrupted_export_range(**_):
+    def interrupted_probe(*_, **__):
         raise KeyboardInterrupt()
 
-    monkeypatch.setattr(cli, "export_range", interrupted_export_range)
+    monkeypatch.setattr(dk, "_probe", interrupted_probe)
 
     rc = cli.main(
         [
+            "--source",
+            "dukascopy",
             "--symbols",
             "EURUSD",
             "--from",
@@ -271,11 +315,46 @@ def _capture_tasks(monkeypatch, *, csvs=()):
 _RANGE = ["--from", "2015-01-01", "--to", "2015-01-31"]
 
 
-def test_source_defaults_to_dukascopy(monkeypatch) -> None:
+def test_source_is_required_and_the_error_names_the_sources(monkeypatch, capsys) -> None:
+    import pytest
+
     captured = _capture_tasks(monkeypatch)
-    assert cli.main(["--symbols", "EURUSD", *_RANGE, "--no-cache"]) == 0
-    assert [t.source.name for t in captured] == ["dukascopy"]
-    assert captured[0].source.price_divisor == 1.0
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--symbols", "EURUSD", *_RANGE, "--no-cache"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "the following arguments are required: --source" in err
+    assert f"(available sources: {', '.join(sources.names())})" in err
+    assert captured == []
+
+
+def test_unknown_source_is_a_usage_error(monkeypatch, capsys) -> None:
+    import pytest
+
+    _capture_tasks(monkeypatch)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--source", "nowhere", "--symbols", "EURUSD", *_RANGE])
+    assert exc.value.code == 2
+    assert "invalid choice: 'nowhere'" in capsys.readouterr().err
+
+
+def test_dukascopy_tasks_carry_the_configured_source(monkeypatch) -> None:
+    captured = _capture_tasks(monkeypatch)
+    rc = cli.main(["--source", "dukascopy", "--symbols", "EURUSD", *_RANGE, "--no-cache"])
+    assert rc == 0
+    [task] = captured
+    assert task.source.name == "dukascopy"
+    assert isinstance(task.source, dk.DukascopySource)
+    assert task.source.price_divisor == 1.0  # the source's own default
+
+
+def test_dukascopy_options_reach_the_source(monkeypatch) -> None:
+    captured = _capture_tasks(monkeypatch)
+    rc = cli.main(
+        ["--source", "dukascopy", "--symbols", "EURUSD", *_RANGE, "--price-divisor", "10"]
+    )
+    assert rc == 0
+    assert captured[0].source.price_divisor == 10.0
 
 
 def test_source_histdata_reaches_the_export_tasks(monkeypatch) -> None:
@@ -285,18 +364,30 @@ def test_source_histdata_reaches_the_export_tasks(monkeypatch) -> None:
     )
     assert rc == 0
     assert [t.source.name for t in captured] == ["histdata", "histdata"]
+    assert captured[0].source is captured[1].source  # one configured source per run
 
 
-def test_histdata_refuses_dukascopy_only_flags(monkeypatch, capsys) -> None:
+def test_a_source_option_is_refused_with_any_other_source(monkeypatch, capsys) -> None:
+    """Every option a source declares is refused, generically, with every other source."""
     import pytest
 
     captured = _capture_tasks(monkeypatch)
-    base = ["--source", "histdata", "--symbols", "EURUSD", *_RANGE]
-    for extra in (["--price-divisor", "1"], ["--probe"], ["--probe-ticks", "5"]):
+    pairs = [
+        (owner, other, opt)
+        for owner in sources.names()
+        for opt in sources.get(owner).options
+        for other in sources.names()
+        if other != owner
+    ]
+    assert pairs, "expected at least one source-specific option"
+    for owner, other, opt in pairs:
+        value = [] if opt.flag_only else ["5"]
+        argv = ["--source", other, "--symbols", "EURUSD", *_RANGE, opt.flag, *value]
         with pytest.raises(SystemExit) as exc:
-            cli.main(base + extra)
+            cli.main(argv)
         assert exc.value.code == 2
-        assert f"{extra[0]}: Dukascopy-only" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert f"{opt.flag} is a --source {owner} option, not valid with --source {other}" in err
     assert captured == []
 
 
@@ -308,6 +399,16 @@ def test_histdata_refuses_an_unmapped_symbol_before_any_export(monkeypatch, caps
         cli.main(["--source", "histdata", "--symbols", "EURUSD", "BTCUSD", *_RANGE])
     assert "BTCUSD has no HistData mapping" in capsys.readouterr().err
     assert captured == []
+
+
+def test_probe_with_two_symbols_is_a_usage_error(monkeypatch, capsys) -> None:
+    import pytest
+
+    monkeypatch.setattr(dk, "_probe", lambda *_, **__: pytest.fail("must not probe"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--source", "dukascopy", "--symbols", "EURUSD", "GBPUSD", *_RANGE, "--probe"])
+    assert exc.value.code == 2
+    assert "--probe mode only supports a single symbol" in capsys.readouterr().err
 
 
 def test_histdata_sidecar_reports_source_and_scale(monkeypatch, tmp_path: Path) -> None:
@@ -337,7 +438,7 @@ def test_dukascopy_sidecar_is_unchanged(monkeypatch, tmp_path: Path) -> None:
     _capture_tasks(monkeypatch, csvs=[bid_csv])
 
     rc = cli.main(
-        ["--symbols", "EURUSD", *_RANGE, "--price-divisor", "10"]
+        ["--source", "dukascopy", "--symbols", "EURUSD", *_RANGE, "--price-divisor", "10"]
         + ["--resample", "1h", "--out", str(tmp_path), "--no-cache"]
     )
 
@@ -348,11 +449,23 @@ def test_dukascopy_sidecar_is_unchanged(monkeypatch, tmp_path: Path) -> None:
     assert set(meta["params"]) == {"date_from", "date_to", "resample", "price_side"}
 
 
-def test_help_documents_source(capsys) -> None:
+def test_help_is_built_from_the_registry(capsys) -> None:
     import pytest
 
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(["--help"])
     out = capsys.readouterr().out
-    assert "--source {dukascopy,histdata}" in out
-    assert "USA500IDXUSD" in out
+    assert f"--source {{{','.join(sources.names())}}}" in out
+    for name in sources.names():
+        cls = sources.get(name)
+        if cls.options:
+            assert f"{name} options (--source {name} only)" in out
+        for opt in cls.options:
+            assert opt.flag in out
+
+
+def test_cli_module_names_no_source() -> None:
+    """The CLI's help text comes from the registry; the module itself names no provider."""
+    text = Path(cli.__file__).read_text().lower()
+    for name in sources.names():
+        assert name not in text

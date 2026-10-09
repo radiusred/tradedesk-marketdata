@@ -6,6 +6,7 @@ import tempfile
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NoReturn
 
 from rich.logging import RichHandler
 
@@ -15,14 +16,10 @@ from .source import (
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_READ_TIMEOUT,
     DEFAULT_RETRIES,
+    ActionRequest,
+    Source,
     SourceError,
 )
-from .sources.dukascopy import export_range
-from .sources.histdata import HISTDATA_SYMBOLS
-
-SOURCES = tuple(sources.names())
-# Flags that only mean something for the Dukascopy datafeed.
-_DUKASCOPY_ONLY = ("--price-divisor", "--probe", "--probe-ticks")
 
 # Map CLI --log-level choices that are not valid stdlib `logging` level names
 # onto their stdlib equivalents.
@@ -66,18 +63,27 @@ def configure_logging(level: str = "INFO") -> None:
     root_logger.addHandler(handler)
 
 
+class _ExportParser(argparse.ArgumentParser):
+    """An argument parser whose missing-``--source`` error names the sources."""
+
+    def error(self, message: str) -> NoReturn:
+        if message.startswith("the following arguments are required") and "--source" in message:
+            message += f" (available sources: {', '.join(sources.names())})"
+        super().error(message)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="tradedesk-md-export")
+    p = _ExportParser(prog="tradedesk-md-export")
+    registered = [sources.get(name) for name in sources.names()]
     p.add_argument(
         "--source",
-        choices=SOURCES,
-        default="dukascopy",
-        help="where to fetch ticks from (default: dukascopy). 'dukascopy' is Dukascopy's "
-        "hourly datafeed; 'histdata' is HistData.com's monthly tick files, which reach back "
-        "to 2000 for the FX majors and to 2010-11 for the indices, for the symbols in "
-        f"its symbol table ({', '.join(sorted(HISTDATA_SYMBOLS))}). Both write the same "
-        "cache files; a day already in the cache is never rewritten, whichever source "
-        "wrote it. --price-divisor, --probe and --probe-ticks are Dukascopy-only.",
+        choices=sources.names(),
+        required=True,
+        help="where to fetch ticks from (required). "
+        + "; ".join(f"'{cls.name}': {cls.summary}" for cls in registered)
+        + ". Every source writes the same cache files; a day already in the cache is never "
+        "rewritten, whichever source wrote it. A source's own options (below) are refused "
+        "with any other source.",
     )
     p.add_argument(
         "--symbols",
@@ -104,14 +110,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="resample rule (candles only) - the sizing of the output candles, e.g. 5min, 1H, 1D",
     )
     p.add_argument(
-        "--price-divisor",
-        type=float,
-        default=None,
-        help="only used if Dukascopy tick prices are encoded as int32; "
-        "divisor applied during decode and recorded in metadata (default: 1). "
-        "Dukascopy only: HistData prices are scaled per symbol",
-    )
-    p.add_argument(
         "--cache-dir",
         type=Path,
         default=Path(".cache/marketdata"),
@@ -133,45 +131,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--commit-partial-after-days",
         type=int,
         default=7,
-        help="Age (in UTC days) past which a day with permanent-gap hours "
-        "(404 / decode-failure) is committed from its available hours instead "
-        "of being left for retry; the day is recorded in the per-symbol "
-        "_partial_days.jsonl manifest. Use 0 to commit any permanent-gap day "
-        "immediately (orphan-cache backfill sweep). With --source histdata, the "
-        "age past the end of a month after which HistData's file for it is "
-        "treated as final. Default: 7",
+        help="Age (in UTC days) past which a source treats a gap as permanent and commits "
+        "what it has; a partial day is recorded in the per-symbol _partial_days.jsonl manifest. "
+        + "; ".join(f"{cls.name}: {cls.partial_commit_rule}" for cls in registered)
+        + ". Default: 7",
     )
     p.add_argument(
         "--connect-timeout",
         type=float,
         default=DEFAULT_CONNECT_TIMEOUT,
-        help="Seconds to wait for a connection to the datafeed on each request "
+        help="Seconds to wait for a connection to the source on each request "
         f"(default: {DEFAULT_CONNECT_TIMEOUT:g})",
     )
     p.add_argument(
         "--read-timeout",
         type=float,
         default=DEFAULT_READ_TIMEOUT,
-        help="Seconds to wait for the datafeed to answer on each request; a slow "
-        f"datafeed needs this raised, not --retries (default: {DEFAULT_READ_TIMEOUT:g})",
+        help="Seconds to wait for the source to answer on each request; a slow "
+        f"source needs this raised, not --retries (default: {DEFAULT_READ_TIMEOUT:g})",
     )
     p.add_argument(
         "--retries",
         type=int,
         default=DEFAULT_RETRIES,
-        help="Attempts per hour (Dukascopy) or per month (HistData) before it is skipped "
-        f"for this run (default: {DEFAULT_RETRIES})",
-    )
-    p.add_argument(
-        "--probe",
-        action="store_true",
-        help="Probe one hour and print decoded ticks; no files written.",
-    )
-    p.add_argument(
-        "--probe-ticks",
-        type=int,
-        default=None,
-        help="Number of ticks to print when probing (default: 10)",
+        help="Attempts per fetch unit ("
+        + ", ".join(f"{cls.name}: one {cls.unit}" for cls in registered)
+        + f") before it is skipped for this run (default: {DEFAULT_RETRIES})",
     )
     p.add_argument(
         "--out",
@@ -184,7 +169,37 @@ def build_parser() -> argparse.ArgumentParser:
         default="info",
         help="Logging level (default: info)",
     )
+    for cls in registered:
+        group = p.add_argument_group(f"{cls.name} options (--source {cls.name} only)")
+        for opt in cls.options:
+            if opt.flag_only:
+                group.add_argument(opt.flag, dest=opt.dest, action="store_true", help=opt.help)
+            else:
+                kwargs: dict[str, object] = {"default": None, "metavar": opt.metavar}
+                if opt.type is not None:
+                    kwargs["type"] = opt.type
+                group.add_argument(opt.flag, dest=opt.dest, help=opt.help, **kwargs)  # type: ignore[arg-type]
     return p
+
+
+def _configure_source(parser: argparse.ArgumentParser, args: argparse.Namespace) -> Source:
+    """The chosen source with its options; another source's option is a usage error."""
+    given = [
+        (opt.flag, other)
+        for other in sources.names()
+        if other != args.source
+        for opt in sources.get(other).options
+        if opt.given(getattr(args, opt.dest))
+    ]
+    if given:
+        parser.error(
+            "; ".join(
+                f"{flag} is a --source {other} option, not valid with --source {args.source}"
+                for flag, other in given
+            )
+        )
+    cls = sources.get(args.source)
+    return cls({opt.dest: getattr(args, opt.dest) for opt in cls.options})
 
 
 def _wait_for_export_threads(log: logging.Logger) -> None:
@@ -221,32 +236,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.resample is not None and args.out is None:
         parser.error("--out is required when using --resample")
 
-    if args.source == "histdata":
-        given = [
-            flag
-            for flag, value in zip(
-                _DUKASCOPY_ONLY, (args.price_divisor, args.probe, args.probe_ticks), strict=True
-            )
-            if value not in (None, False)
-        ]
-        if given:
-            parser.error(
-                f"{', '.join(given)}: Dukascopy-only, not valid with --source histdata "
-                "(HistData prices are scaled into the cache's units by the symbol table)"
-            )
-    options = (
-        {"price_divisor": args.price_divisor, "probe": args.probe, "probe_ticks": args.probe_ticks}
-        if args.source == "dukascopy"
-        else {}
-    )
-    source = sources.create(args.source, options)
+    source = _configure_source(parser, args)
     try:
         for symbol in args.symbols:
             source.check_symbol(symbol)
     except SourceError as e:
         parser.error(str(e))
-    price_divisor = 1.0 if args.price_divisor is None else args.price_divisor
-    probe_ticks = 10 if args.probe_ticks is None else args.probe_ticks
 
     start_utc = _parse_ymd(args.date_from)
     end_utc = _parse_ymd(args.date_to)
@@ -266,39 +261,33 @@ def main(argv: list[str] | None = None) -> int:
     workers = max(1, args.workers)
 
     log = logging.getLogger(__name__)
-    log.info(f"Processing {len(args.symbols)} symbols with up to {workers} workers")
+    cache_dir = None if args.no_cache else args.cache_dir
 
-    # Handle probe mode (single symbol, single-threaded)
-    if args.probe:
-        if len(args.symbols) > 1:
-            raise SystemExit("--probe mode only supports a single symbol")
-
-        symbol = args.symbols[0]
-
-        try:
-            export_range(
-                symbol=symbol,
+    # A source command that replaces the export (e.g. a probe).
+    try:
+        rc = source.action(
+            ActionRequest(
+                symbols=list(args.symbols),
                 start_utc=start_utc,
                 end_utc_inclusive=end_utc,
-                resample_rule=args.resample,
-                price_divisor=price_divisor,
-                cache_dir=None if args.no_cache else args.cache_dir,
-                probe=True,
-                probe_ticks=probe_ticks,
-                out=Path(tempfile.gettempdir()),
+                cache_dir=cache_dir,
                 timeout=timeout,
                 retries=args.retries,
             )
-        except KeyboardInterrupt:
-            return 130
+        )
+    except SourceError as e:
+        parser.error(str(e))
+    except KeyboardInterrupt:
+        return 130
+    if rc is not None:
+        return rc
 
-        return 0
+    log.info(f"Processing {len(args.symbols)} symbols with up to {workers} workers")
 
     # Build export tasks
     from tradedesk_marketdata.parallel import ExportTask, run_parallel_exports
 
     out = Path(args.out) if args.out is not None else Path(tempfile.gettempdir())
-    cache_dir = None if args.no_cache else args.cache_dir
 
     tasks = [
         ExportTask(
