@@ -12,6 +12,7 @@ Usage::
     python scripts/audit_fx_scale.py NZDUSD --cache-dir ./cache --min 0.30 --max 2.00
     python scripts/audit_fx_scale.py NZDUSD --cache-dir ./cache --print-dates
 """
+
 from __future__ import annotations
 
 import argparse
@@ -133,9 +134,7 @@ def main() -> int:
         print(f"  {yr}: {len(per_year[yr])}")
     dow_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     print(
-        "audit: day-of-week histogram " + " ".join(
-            f"{dow_names[k]}:{per_dow[k]}" for k in range(7)
-        )
+        "audit: day-of-week histogram " + " ".join(f"{dow_names[k]}:{per_dow[k]}" for k in range(7))
     )
     print("audit: flagged dates (sorted):")
     for d in sorted(flagged_dates):

@@ -258,9 +258,7 @@ def normalize_symbol(
             if not month_dir.is_dir():
                 continue
             for bid_path in sorted(month_dir.glob("*_bid.csv.zst")):
-                ask_path = bid_path.parent / bid_path.name.replace(
-                    "_bid.csv.zst", "_ask.csv.zst"
-                )
+                ask_path = bid_path.parent / bid_path.name.replace("_bid.csv.zst", "_ask.csv.zst")
 
                 df_bid = _read_zst(bid_path)
                 if df_bid is None or df_bid.empty:
@@ -281,13 +279,23 @@ def normalize_symbol(
                     action = "would divide" if dry_run else "dividing"
                     log.info(
                         "%s %s: median close %.4f is %.0f× too large — %s by %.0f",
-                        symbol, day_label, median, 1.0 / factor, action, 1.0 / factor,
+                        symbol,
+                        day_label,
+                        median,
+                        1.0 / factor,
+                        action,
+                        1.0 / factor,
                     )
                 else:
                     action = "would multiply" if dry_run else "multiplying"
                     log.info(
                         "%s %s: median close %.4f is %.0f× too small — %s by %.0f",
-                        symbol, day_label, median, factor, action, factor,
+                        symbol,
+                        day_label,
+                        median,
+                        factor,
+                        action,
+                        factor,
                     )
 
                 result["fixed"] += 1

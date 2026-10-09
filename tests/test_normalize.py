@@ -179,11 +179,21 @@ def test_infer_factor_fx_majors_in_their_natural_range_left_unchanged() -> None:
     # Every non-JPY, non-high-rate FX cross in our universe must sit inside
     # the tightened standard band — protects against false positives.
     for sym, natural in {
-        "AUDCAD": 0.90,  "AUDNZD": 1.09,  "AUDUSD": 0.66,
-        "EURCAD": 1.49,  "EURCHF": 0.94,  "EURGBP": 0.84,
-        "EURSGD": 1.46,  "EURUSD": 1.10,  "GBPAUD": 1.95,
-        "GBPCHF": 1.13,  "GBPUSD": 1.27,  "NZDCAD": 0.83,
-        "NZDUSD": 0.59,  "USDCAD": 1.36,  "USDCHF": 0.85,
+        "AUDCAD": 0.90,
+        "AUDNZD": 1.09,
+        "AUDUSD": 0.66,
+        "EURCAD": 1.49,
+        "EURCHF": 0.94,
+        "EURGBP": 0.84,
+        "EURSGD": 1.46,
+        "EURUSD": 1.10,
+        "GBPAUD": 1.95,
+        "GBPCHF": 1.13,
+        "GBPUSD": 1.27,
+        "NZDCAD": 0.83,
+        "NZDUSD": 0.59,
+        "USDCAD": 1.36,
+        "USDCHF": 0.85,
     }.items():
         lo, hi = _expected_price_range(sym)
         assert infer_correction_factor(natural, lo, hi) == 1.0, (

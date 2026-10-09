@@ -141,9 +141,7 @@ def gap_audit(df: pd.DataFrame, is_index: bool = False) -> GapResult:
     diffs = pd.Series(observed_idx).diff().dt.total_seconds() / 60.0
     intraday = diffs[(diffs > 1) & (diffs < 60 * 12)]  # exclude weekend gaps
     longest = int(intraday.max()) if not intraday.empty else 0
-    longest_idx = (
-        observed_idx[int(intraday.idxmax())].isoformat() if not intraday.empty else None
-    )
+    longest_idx = observed_idx[int(intraday.idxmax())].isoformat() if not intraday.empty else None
     over_15 = int((intraday > 15).sum())
 
     return GapResult(
@@ -299,8 +297,10 @@ def stale_audit(df: pd.DataFrame) -> StaleResult:
     if not all(c in df.columns for c in needed):
         return StaleResult(0, 0, 0, None, 0)
     rows = df[needed].astype(float)
-    flat_within = (rows["bid_open"] == rows["bid_high"]) & (rows["bid_high"] == rows["bid_low"]) & (
-        rows["bid_low"] == rows["bid_close"]
+    flat_within = (
+        (rows["bid_open"] == rows["bid_high"])
+        & (rows["bid_high"] == rows["bid_low"])
+        & (rows["bid_low"] == rows["bid_close"])
     )
     same_as_prev = rows["bid_close"] == rows["bid_close"].shift(1)
     stale_mask = flat_within & same_as_prev
