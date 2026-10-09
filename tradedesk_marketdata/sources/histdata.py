@@ -18,7 +18,8 @@ rather than one request per hour.
   Settled months are staged under ``{cache}/{SYMBOL}/_histdata/{YYYY}{MM}.zip``
   until every day they cover is committed.
 - **Decode:** ``decode_ticks`` turns the zip's CSV into ticks in UTC, scaled
-  into the cache's raw units by the symbol table.
+  into the cache's raw units by the symbol map (``--symbol-map``, TOML; the
+  package ships ``histdata.example.toml``).
 - **Days:** a day is committed once the data provably covers it (later ticks
   exist, or every month file it needs has settled), as an empty day only when
   there are ticks before it; a day that needs a month HistData has no file for
@@ -37,12 +38,15 @@ from __future__ import annotations
 
 import io
 import logging
+import tomllib
 import zipfile
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from html.parser import HTMLParser
+from importlib import resources
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -62,6 +66,7 @@ from ..source import (
     RETRY_MAX_DELAY,
     Commit,
     Decision,
+    Exclude,
     Leave,
     Partial,
     Provenance,
@@ -69,6 +74,7 @@ from ..source import (
     Source,
     SourceDescription,
     SourceError,
+    SourceOption,
     SourceRun,
     Wait,
 )
@@ -101,8 +107,24 @@ YearMonth = tuple[int, int]
 
 
 # ---------------------------------------------------------------------------
-# Symbol table
+# Symbol map
 # ---------------------------------------------------------------------------
+#
+# Which cache symbols HistData serves, under which code, at which scale and
+# from which month is configuration: a TOML symbol map. The package ships
+# ``histdata.example.toml`` (documented there), used when no --symbol-map is
+# given.
+
+SYMBOL_MAP_EXAMPLE = "histdata.example.toml"
+
+
+@dataclass(frozen=True)
+class ExcludedSpan:
+    """Days [first, last] whose HistData data must not be committed, and why."""
+
+    first: date
+    last: date
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -112,63 +134,137 @@ class HistDataInstrument:
     name: str  # HistData's instrument code, e.g. "SPXUSD"
     scale: float  # cache raw price = HistData decimal price x scale
     first_month: YearMonth  # earliest (year, month) HistData serves ticks for
+    scale_verified: bool = False  # the scale was confirmed against another source
+    scale_evidence: str = ""
+    exclude: tuple[ExcludedSpan, ...] = ()
+
+    def excluded(self, day: date) -> ExcludedSpan | None:
+        """The exclusion span ``day`` falls in, if any."""
+        return next((s for s in self.exclude if s.first <= day <= s.last), None)
 
 
-# The cache stores Dukascopy's raw units, and downstream ``raw_scale`` settings
-# depend on them, so HistData's decimal prices are scaled on decode:
-_PIP4 = 1e4  # FX quoted to a 0.0001 pip: 1.10366 -> 11036.6
-_PIP2 = 1e2  # JPY-quoted FX and gold: 179.601 -> 17960.1, $2063.625 -> 206362.5
-_POINTS = 1.0  # indices (points) and Brent (dollars) as quoted: 4774.361 -> 4774.361
+class SymbolMapError(SourceError):
+    """A symbol map that cannot be used: unreadable, not TOML, or not the schema."""
 
-# Cache symbol -> HistData instrument. Names and first months checked against
-# histdata.com's tick-data instrument list on 2026-10-08; scales checked against
-# the median close of cached Dukascopy days (EURUSD ~11217, USDJPY ~12029,
-# XAUUSD ~151948, USA500IDXUSD ~4782 and so on). EURSEK's scale follows the
-# 4-decimal FX convention; no cached day was available to confirm it.
-# Not on HistData, so not mapped: EURSGD, GBPEUR, BTCUSD.
-HISTDATA_SYMBOLS: dict[str, HistDataInstrument] = {
-    # Indices and commodities: HistData uses its own codes.
-    "USA500IDXUSD": HistDataInstrument("SPXUSD", _POINTS, (2010, 11)),
-    "DEUIDXEUR": HistDataInstrument("GRXEUR", _POINTS, (2010, 11)),
-    "GBRIDXGBP": HistDataInstrument("UKXGBP", _POINTS, (2010, 11)),
-    "JPNIDXJPY": HistDataInstrument("JPXJPY", _POINTS, (2010, 11)),
-    "AUSIDXAUD": HistDataInstrument("AUXAUD", _POINTS, (2010, 11)),
-    "BRENTCMDUSD": HistDataInstrument("BCOUSD", _POINTS, (2010, 11)),
-    "XAUUSD": HistDataInstrument("XAUUSD", _PIP2, (2009, 3)),
-    # FX: same names on both sides.
-    "AUDCAD": HistDataInstrument("AUDCAD", _PIP4, (2007, 7)),
-    "AUDJPY": HistDataInstrument("AUDJPY", _PIP2, (2002, 8)),
-    "AUDNZD": HistDataInstrument("AUDNZD", _PIP4, (2007, 9)),
-    "AUDUSD": HistDataInstrument("AUDUSD", _PIP4, (2000, 6)),
-    "CHFJPY": HistDataInstrument("CHFJPY", _PIP2, (2002, 8)),
-    "EURCAD": HistDataInstrument("EURCAD", _PIP4, (2007, 3)),
-    "EURCHF": HistDataInstrument("EURCHF", _PIP4, (2002, 3)),
-    "EURGBP": HistDataInstrument("EURGBP", _PIP4, (2002, 3)),
-    "EURSEK": HistDataInstrument("EURSEK", _PIP4, (2008, 8)),
-    "EURUSD": HistDataInstrument("EURUSD", _PIP4, (2000, 5)),
-    "GBPAUD": HistDataInstrument("GBPAUD", _PIP4, (2007, 9)),
-    "GBPCHF": HistDataInstrument("GBPCHF", _PIP4, (2002, 8)),
-    "GBPJPY": HistDataInstrument("GBPJPY", _PIP2, (2002, 5)),
-    "GBPUSD": HistDataInstrument("GBPUSD", _PIP4, (2000, 5)),
-    "NZDCAD": HistDataInstrument("NZDCAD", _PIP4, (2008, 3)),
-    "USDCAD": HistDataInstrument("USDCAD", _PIP4, (2000, 6)),
-    "USDCHF": HistDataInstrument("USDCHF", _PIP4, (2000, 5)),
-    "USDJPY": HistDataInstrument("USDJPY", _PIP2, (2000, 5)),
-}
+
+_ENTRY_KEYS = {"name", "scale", "first_month", "scale_verified", "scale_evidence", "exclude"}
+_SPAN_KEYS = {"from", "to", "reason"}
+
+
+def _parse_entry(where: str, symbol: str, entry: object) -> HistDataInstrument:
+    def bad(msg: str) -> SymbolMapError:
+        return SymbolMapError(f"{where}: symbols.{symbol}: {msg}")
+
+    if not isinstance(entry, dict):
+        raise bad("must be a table")
+    unknown = set(entry) - _ENTRY_KEYS
+    if unknown:
+        raise bad(f"unknown key(s) {', '.join(sorted(unknown))}")
+    name = entry.get("name")
+    if not isinstance(name, str) or not name:
+        raise bad("name must be HistData's instrument code")
+    scale = entry.get("scale")
+    if isinstance(scale, bool) or not isinstance(scale, int | float) or not scale > 0:
+        raise bad("scale must be a number above zero")
+    month = entry.get("first_month")
+    try:
+        assert isinstance(month, str) and len(month) == 7 and month[4] == "-"
+        first_month = (int(month[:4]), int(month[5:]))
+        assert 1 <= first_month[1] <= 12
+    except (AssertionError, ValueError):
+        raise bad('first_month must be "YYYY-MM"') from None
+    verified = entry.get("scale_verified", False)
+    if not isinstance(verified, bool):
+        raise bad("scale_verified must be true or false")
+    evidence = entry.get("scale_evidence", "")
+    if not isinstance(evidence, str):
+        raise bad("scale_evidence must be text")
+    spans = entry.get("exclude", [])
+    if not isinstance(spans, list):
+        raise bad("exclude must be a list of {from, to, reason} tables")
+    exclude = []
+    for span in spans:
+        if not isinstance(span, dict) or set(span) != _SPAN_KEYS:
+            raise bad("each exclude entry needs exactly from, to and reason")
+        first, last, reason = span["from"], span["to"], span["reason"]
+        if not isinstance(first, date) or isinstance(first, datetime):
+            raise bad("exclude from must be a date (YYYY-MM-DD)")
+        if not isinstance(last, date) or isinstance(last, datetime):
+            raise bad("exclude to must be a date (YYYY-MM-DD)")
+        if last < first:
+            raise bad(f"exclude span {first}..{last} ends before it starts")
+        if not isinstance(reason, str) or not reason:
+            raise bad("exclude reason must be text")
+        exclude.append(ExcludedSpan(first, last, reason))
+    return HistDataInstrument(
+        name=name,
+        scale=float(scale),
+        first_month=first_month,
+        scale_verified=verified,
+        scale_evidence=evidence,
+        exclude=tuple(exclude),
+    )
+
+
+def load_symbol_map(path: Path | None = None) -> dict[str, HistDataInstrument]:
+    """Read a TOML symbol map (the shipped example when ``path`` is None).
+
+    Raises ``SymbolMapError`` for a file that cannot be read or does not follow
+    the schema documented in the example.
+    """
+    if path is None:
+        where = SYMBOL_MAP_EXAMPLE
+        raw = (
+            resources.files("tradedesk_marketdata.sources")
+            .joinpath(SYMBOL_MAP_EXAMPLE)
+            .read_bytes()
+        )
+    else:
+        where = str(path)
+        try:
+            raw = Path(path).read_bytes()
+        except OSError as e:
+            raise SymbolMapError(f"{where}: cannot read the symbol map ({e})") from None
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        raise SymbolMapError(f"{where}: not a TOML file ({e})") from None
+    if set(data) - {"symbols"}:
+        raise SymbolMapError(
+            f"{where}: unknown top-level key(s) {', '.join(sorted(set(data) - {'symbols'}))}"
+        )
+    table = data.get("symbols")
+    if not isinstance(table, dict) or not table:
+        raise SymbolMapError(f"{where}: no [symbols.<SYMBOL>] entries")
+    out: dict[str, HistDataInstrument] = {}
+    for symbol, entry in table.items():
+        key = _symbol_normalise(symbol)
+        if key != symbol:
+            raise SymbolMapError(f"{where}: symbols.{symbol}: write the cache symbol as {key}")
+        out[key] = _parse_entry(where, symbol, entry)
+    return out
+
+
+# The shipped symbol map, as loaded.
+HISTDATA_SYMBOLS: dict[str, HistDataInstrument] = load_symbol_map()
 
 
 class UnmappedSymbolError(SourceError):
-    """The symbol has no entry in the HistData symbol table."""
+    """The symbol has no entry in the HistData symbol map."""
 
 
-def lookup(symbol: str) -> HistDataInstrument:
-    """Return the HistData mapping for a cache symbol, or raise ``UnmappedSymbolError``."""
+def lookup(symbol: str, symbols: dict[str, HistDataInstrument] | None = None) -> HistDataInstrument:
+    """Return a cache symbol's HistData mapping (from ``symbols``, default the shipped map).
+
+    Raises ``UnmappedSymbolError`` for a symbol the map does not hold.
+    """
+    table = HISTDATA_SYMBOLS if symbols is None else symbols
     key = _symbol_normalise(symbol)
     try:
-        return HISTDATA_SYMBOLS[key]
+        return table[key]
     except KeyError:
         raise UnmappedSymbolError(
-            f"{key} has no HistData mapping; mapped symbols: {', '.join(sorted(HISTDATA_SYMBOLS))}"
+            f"{key} has no HistData mapping; mapped symbols: {', '.join(sorted(table))}"
         ) from None
 
 
@@ -459,6 +555,12 @@ class _HistDataRun(SourceRun):
         self.ctx = ctx
         self.symbol = ctx.symbol
         self.inst = source.instrument(ctx.symbol)
+        if not self.inst.scale_verified:
+            log.warning(
+                f"{self.symbol}: the symbol map's scale {self.inst.scale:g} for HistData "
+                f"{self.inst.name} is not verified (scale_verified = false); check a few "
+                "committed days against another source before trusting them"
+            )
         self.now = datetime.now(UTC)
         self.settle_after = timedelta(days=ctx.commit_partial_after_days)
         self.status: dict[YearMonth, str] = {}  # ok | before_first | unavailable | failed
@@ -605,11 +707,22 @@ class _HistDataRun(SourceRun):
         self.last_tick = t1 if self.last_tick is None else max(self.last_tick, t1)
         return ticks
 
+    def excludes(self, day: date) -> str | None:
+        span = self.inst.excluded(day)
+        return None if span is None else span.reason
+
+    def _units(self, day: date) -> str:
+        units = [_zip_name(self.inst, m) for m in _months_for_day(day) if self.status[m] == "ok"]
+        return "+".join(units) if units else "none"
+
     def decide(self, day: date, *, has_data: bool) -> Decision:
-        # TODO(#83): a day inside one of the instrument's exclusion spans (from
-        # the symbol map) is answered here with Exclude(reason, source_unit=...),
-        # and excludes(day) is overridden to answer from the same spans, so a
-        # recorded exclusion is not fetched again until its span is removed.
+        # A day inside one of the symbol map's exclusion spans is never committed
+        # from HistData, whatever its data; the framework records why.
+        # TODO(#83): a month-join level check, the provider's own guard against a
+        # substituted instrument, belongs here too.
+        span = self.inst.excluded(day)
+        if span is not None:
+            return Exclude(span.reason, source_unit=self._units(day))
         needed = _months_for_day(day)
         states = [self.status[m] for m in needed]
         if "failed" in states:
@@ -645,11 +758,7 @@ class _HistDataRun(SourceRun):
         return Commit()
 
     def committed(self, day: date, *, empty: bool) -> Provenance:
-        units = [_zip_name(self.inst, m) for m in _months_for_day(day) if self.status[m] == "ok"]
-        return Provenance(
-            scale_factor=self.inst.scale,
-            source_unit="+".join(units) if units else "none",
-        )
+        return Provenance(scale_factor=self.inst.scale, source_unit=self._units(day))
 
     def finish(self) -> None:
         # Retire month zips whose days are all committed; keep the rest for the next run.
@@ -687,18 +796,34 @@ class HistDataSource(Source):
     name = SOURCE
     summary = (
         "HistData.com's monthly tick files, which reach back to 2000 for the FX majors and "
-        "to 2010-11 for the indices, for the symbols in its symbol table "
-        f"({', '.join(sorted(HISTDATA_SYMBOLS))}); prices are scaled into the cache's units "
-        "per symbol"
+        "to 2010-11 for the indices, for the symbols in its symbol map (--symbol-map; the "
+        f"shipped one maps {', '.join(sorted(HISTDATA_SYMBOLS))}); prices are scaled into "
+        "the cache's units per symbol"
     )
     unit = "month file"
     partial_commit_rule = (
         "the age past the end of a month after which HistData's file for it is treated as final"
     )
 
+    options = (
+        SourceOption(
+            "--symbol-map",
+            type=Path,
+            metavar="FILE",
+            help="TOML symbol map: each cache symbol's HistData code, scale into the cache's "
+            "units, first month, scale verification and exclusion spans (default: the shipped "
+            f"{SYMBOL_MAP_EXAMPLE}; copy it to change it)",
+        ),
+    )
+
+    def __init__(self, options: Mapping[str, Any] | None = None) -> None:
+        super().__init__(options)
+        self.symbol_map: Path | None = self.option("symbol_map")
+        self.symbols = load_symbol_map(self.symbol_map)  # SymbolMapError on a bad file
+
     def instrument(self, symbol: str) -> HistDataInstrument:
         """The symbol's HistData mapping (raises ``UnmappedSymbolError``)."""
-        return lookup(symbol)
+        return lookup(symbol, self.symbols)
 
     def check_symbol(self, symbol: str) -> None:
         self.instrument(symbol)
@@ -726,6 +851,7 @@ def export_range_histdata(
     timeout: tuple[float, float] = (DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT),
     retries: int = DEFAULT_RETRIES,
     keep_raw: bool = False,
+    symbol_map: Path | None = None,
 ) -> tuple[Path | None, Path | None]:
     """Export the UTC days of [start_utc, end_utc_inclusive] from HistData.
 
@@ -755,7 +881,7 @@ def export_range_histdata(
       ``histdata``, the symbol's scale factor and the month zip(s) it came from.
     """
     return _export.export_range(
-        source=HistDataSource(),
+        source=HistDataSource({"symbol_map": symbol_map}),
         symbol=symbol,
         start_utc=start_utc,
         end_utc_inclusive=end_utc_inclusive,
@@ -772,12 +898,16 @@ def export_range_histdata(
 
 __all__ = [
     "HISTDATA_SYMBOLS",
+    "SYMBOL_MAP_EXAMPLE",
+    "ExcludedSpan",
     "HistDataInstrument",
     "HistDataSource",
     "MonthFetchError",
+    "SymbolMapError",
     "SOURCE",
     "UnmappedSymbolError",
     "decode_ticks",
     "export_range_histdata",
+    "load_symbol_map",
     "lookup",
 ]
