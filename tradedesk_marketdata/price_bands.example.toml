@@ -1,0 +1,77 @@
+# Expected natural-unit price bands for `tradedesk-md-normalize`.
+#
+# This file ships with the package and is used when --bands is not given. To
+# change it, copy it, edit the copy and pass `--bands your-copy.toml`.
+#
+# normalize brings a day whose median close lies outside its symbol's band back
+# into it by a power of ten; a day already inside the band is left alone. A band
+# is [low, high] in the instrument's natural units (EURUSD 1.08, USDJPY 157,
+# XAUUSD 2300, an index in points). Make each band wide enough to hold the
+# instrument's whole history in the cache, but narrower than a factor of ten,
+# or two powers of ten can both land inside it.
+#
+# A symbol's band is looked up in this order:
+#   1. [symbols]  an exact cache symbol (case-insensitive);
+#   2. [[contains]]  the first rule whose pattern occurs in the symbol;
+#   3. default.
+
+# Standard 4-decimal FX. The upper bound is 5.0 so that a pair stored ten times
+# too high (NZDUSD at 5.87 instead of 0.587) is caught; pairs that trade above
+# 5 have their own band below.
+default = [0.3, 5.0]
+
+# An index this file does not name; deliberately wide.
+[[contains]]
+pattern = "IDX"
+band = [100.0, 500000.0]
+
+[symbols]
+# JPY crosses
+AUDJPY = [50.0, 500.0]
+CADJPY = [50.0, 500.0]
+CHFJPY = [50.0, 500.0]
+EURJPY = [50.0, 500.0]
+GBPJPY = [50.0, 500.0]
+NZDJPY = [50.0, 500.0]
+SGDJPY = [50.0, 500.0]
+USDJPY = [50.0, 500.0]
+
+# Gold: a lower bound of 1000 keeps a gold price above 5000 from being read
+# as ten times too large.
+XAUUSD = [1000.0, 50000.0]
+# Silver
+XAGUSD = [10.0, 500.0]
+# Palladium has traded from about 200 to 3400 USD/oz.
+XPDCMDUSD = [100.0, 5000.0]
+# Platinum has traded from about 400 to 2250 USD/oz.
+XPTCMDUSD = [200.0, 3000.0]
+
+# Crude oil, USD per barrel.
+BRENTCMDUSD = [10.0, 250.0]
+WTIOILUSD = [10.0, 250.0]
+USOILUSD = [10.0, 250.0]
+LIGHTCMDUSD = [10.0, 250.0]
+
+# Copper, USD/lb: wide enough for a spike to 6.40, narrow enough to catch 10x.
+COPPERCMDUSD = [0.3, 15.0]
+# Natural gas, USD/MMBtu: wide enough for spikes near 13.
+GASCMDUSD = [0.5, 25.0]
+NATGASCMDUSD = [0.5, 25.0]
+
+# Euro Bund future, a price index around 110-180.
+BUNDTREUR = [80.0, 200.0]
+
+# FX pairs that trade above 5 (SEK and NOK crosses).
+EURSEK = [5.0, 20.0]
+EURNOK = [5.0, 20.0]
+USDNOK = [5.0, 20.0]
+GBPSEK = [5.0, 20.0]
+GBPNOK = [5.0, 20.0]
+
+# Indices, each tight enough that only one power of ten lands inside.
+USA500IDXUSD = [1000.0, 10000.0]  # S&P 500
+USATECHIDXUSD = [2000.0, 30000.0]  # Nasdaq Composite
+DEUIDXEUR = [3000.0, 30000.0]  # DAX
+GBRIDXGBP = [2000.0, 12000.0]  # FTSE 100
+JPNIDXJPY = [10000.0, 100000.0]  # Nikkei 225
+AUSIDXAUD = [3000.0, 12000.0]  # ASX 200

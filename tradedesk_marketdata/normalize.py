@@ -17,11 +17,10 @@ The correct divisor varies by instrument type:
 
 A second class of miscalibration arises when the inferred divisor was the
 wrong one because the instrument's price had moved outside the expected
-range.  A known instance: XAUUSD files downloaded between 2026-01-25 and
-2026-03-10 were stored at ÷1 000 instead of ÷100 because gold broke $5 000
-for the first time and the plausible-range guard was set too low
-(``(500, 50_000)``).  The guard was corrected to ``(1_000, 50_000)`` in the
-same release that introduced this module.
+range: with a gold band of ``(500, 50_000)``, a gold price above $5 000 stored
+at ÷1 000 instead of ÷100 still lands inside it.  That is why bands are
+configuration (``price_bands.example.toml``, ``--bands``) and should hold an
+instrument's whole history in the cache.
 
 Both classes of error reduce to the same shape: every OHLC value on the
 affected day is too large or too small by an integer power of ten.  This
@@ -34,6 +33,9 @@ from __future__ import annotations
 
 import logging
 import math
+import tomllib
+from dataclasses import dataclass, field
+from importlib import resources
 from pathlib import Path
 
 import pandas as pd
@@ -46,110 +48,108 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Instrument classification
+# Expected price bands: configuration
 # ---------------------------------------------------------------------------
+#
+# Which band a symbol's natural price should sit in is configuration, read from
+# a TOML file; the package ships ``price_bands.example.toml`` (documented there)
+# and uses it when no --bands is given.
 
-_JPY_CROSSES = frozenset(
-    {
-        "AUDJPY",
-        "CADJPY",
-        "CHFJPY",
-        "EURJPY",
-        "GBPJPY",
-        "NZDJPY",
-        "SGDJPY",
-        "USDJPY",
-    }
-)
-# Gold and silver need separate ranges: gold has never been below $1 000 in the
-# modern era, so a lower bound of 1 000 prevents ÷1000 from being chosen when
-# the correct divisor is ÷100 (which would happen if gold > $5 000 and the
-# stored raw value is in the 500 000–999 999 range).
-_GOLD = frozenset({"XAUUSD"})
-_SILVER = frozenset({"XAGUSD"})
-_IDX_SUBSTRINGS = ("IDX",)
-# Per-index ranges. The default IDX fallback (100, 500_000) is wide enough to
-# admit two divisors for the same raw value — e.g. USA500 raw ~3 000 000 fits
-# both ÷1000 (3 000) and ÷10000 (300), and infer_price_divisor would pick the
-# larger one (÷10000) since it tries divisors largest-first. Tight per-index
-# bands eliminate that ambiguity.
-_INDEX_RANGES: dict[str, tuple[float, float]] = {
-    "USA500IDXUSD": (1_000.0, 10_000.0),  # S&P 500: ~2400-7000 in our era
-    "USATECHIDXUSD": (2_000.0, 30_000.0),  # Nasdaq Composite: ~3500-22000
-    "DEUIDXEUR": (3_000.0, 30_000.0),  # DAX: ~5000-25000
-    "GBRIDXGBP": (2_000.0, 12_000.0),  # FTSE 100: ~3000-9000
-    # Nikkei 225: broke 60k in Apr-2026; band wide enough to avoid the
-    # XAUUSD-style band-too-low miscalibration.
-    "JPNIDXJPY": (10_000.0, 100_000.0),
-    "AUSIDXAUD": (3_000.0, 12_000.0),  # ASX 200: ~4000-9000
-}
-# Crude oil and energy commodities quoted in USD per barrel (~20–200 range).
-# LIGHTCMDUSD is the WTI light-sweet crude symbol; treat identically.
-_CRUDE_OIL = frozenset({"BRENTCMDUSD", "WTIOILUSD", "USOILUSD", "LIGHTCMDUSD"})
-# COMEX copper futures quoted in USD/lb. Historical envelope $0.50 (1999) to
-# $6.40 (2026-04 spike). Without an explicit band, the standard FX default
-# (0.3, 5.0) would treat any post-2024 day above $5 as 10× too large and
-# corrupt the file.
-_COPPER = frozenset({"COPPERCMDUSD"})
-# Henry-Hub natural gas in USD/MMBtu. Has spiked to ~$13 (2008, 2022).
-_NATGAS = frozenset({"GASCMDUSD", "NATGASCMDUSD"})
-# Platinum-group metals quoted in USD/oz at higher levels than silver.
-_PALLADIUM = frozenset({"XPDCMDUSD"})
-_PLATINUM = frozenset({"XPTCMDUSD"})
-# European bond futures quoted as a price index in the 100–200 range.
-_BOND_FUTURE = frozenset({"BUNDTREUR"})
-# Pairs quoted above 5.0 in their natural rate (e.g. EURSEK ~11, EURNOK ~12).
-# Without this, infer_price_divisor selects ÷100000 instead of ÷10000 because
-# both results fall in the default FX range (0.3, 15.0).
-_HIGH_RATE_FX = frozenset({"EURSEK", "EURNOK", "USDNOK", "GBPSEK", "GBPNOK"})
+PRICE_BANDS_EXAMPLE = "price_bands.example.toml"
+
+Band = tuple[float, float]
 
 
-def _expected_price_range(symbol: str) -> tuple[float, float]:
+class PriceBandsError(ValueError):
+    """A price-bands file that cannot be used: unreadable, not TOML, or not the schema."""
+
+
+@dataclass(frozen=True)
+class PriceBands:
+    """Expected natural-unit price bands: exact symbols, then substring rules, then a default."""
+
+    default: Band
+    contains: tuple[tuple[str, Band], ...] = ()
+    symbols: dict[str, Band] = field(default_factory=dict)
+
+    def band(self, symbol: str) -> Band:
+        upper = symbol.upper()
+        if upper in self.symbols:
+            return self.symbols[upper]
+        for pattern, band in self.contains:
+            if pattern in upper:
+                return band
+        return self.default
+
+
+def _band(where: str, what: str, value: object) -> Band:
+    ok = (
+        isinstance(value, list)
+        and len(value) == 2
+        and all(isinstance(v, int | float) and not isinstance(v, bool) for v in value)
+    )
+    if not ok:
+        raise PriceBandsError(f"{where}: {what} must be [low, high]")
+    assert isinstance(value, list)
+    low, high = float(value[0]), float(value[1])
+    if not 0 < low < high:
+        raise PriceBandsError(f"{where}: {what} must have 0 < low < high")
+    return (low, high)
+
+
+def load_price_bands(path: Path | None = None) -> PriceBands:
+    """Read a TOML price-bands file (the shipped example when ``path`` is None)."""
+    if path is None:
+        where = PRICE_BANDS_EXAMPLE
+        raw = resources.files("tradedesk_marketdata").joinpath(PRICE_BANDS_EXAMPLE).read_bytes()
+    else:
+        where = str(path)
+        try:
+            raw = Path(path).read_bytes()
+        except OSError as e:
+            raise PriceBandsError(f"{where}: cannot read the price bands ({e})") from None
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        raise PriceBandsError(f"{where}: not a TOML file ({e})") from None
+    unknown = set(data) - {"default", "contains", "symbols"}
+    if unknown:
+        raise PriceBandsError(f"{where}: unknown key(s) {', '.join(sorted(unknown))}")
+    if "default" not in data:
+        raise PriceBandsError(f"{where}: no default band")
+    default = _band(where, "default", data["default"])
+    contains = []
+    for i, rule in enumerate(data.get("contains", [])):
+        if not isinstance(rule, dict) or set(rule) != {"pattern", "band"}:
+            raise PriceBandsError(f"{where}: contains[{i}] needs exactly pattern and band")
+        if not isinstance(rule["pattern"], str) or not rule["pattern"]:
+            raise PriceBandsError(f"{where}: contains[{i}].pattern must be text")
+        contains.append(
+            (rule["pattern"].upper(), _band(where, f"contains[{i}].band", rule["band"]))
+        )
+    table = data.get("symbols", {})
+    if not isinstance(table, dict):
+        raise PriceBandsError(f"{where}: symbols must be a table of SYMBOL = [low, high]")
+    symbols = {k.upper(): _band(where, f"symbols.{k}", v) for k, v in table.items()}
+    return PriceBands(default=default, contains=tuple(contains), symbols=symbols)
+
+
+_SHIPPED_BANDS: PriceBands | None = None
+
+
+def _expected_price_range(symbol: str, bands: PriceBands | None = None) -> Band:
     """Return the (min, max) plausible mid-price range for *symbol*.
 
-    These ranges are used to detect and correct price scale errors in cached
-    daily candle files.  They are intentionally wide to avoid false positives.
+    From ``bands``, or the shipped ``price_bands.example.toml`` when None. The
+    ranges are used to detect and correct price scale errors in cached daily
+    candle files, and are intentionally wide to avoid false positives.
     """
-    upper = symbol.upper()
-    if upper in _JPY_CROSSES:
-        return (50.0, 500.0)
-    if upper in _GOLD:
-        return (1_000.0, 50_000.0)
-    if upper in _SILVER:
-        return (10.0, 500.0)
-    if upper in _PALLADIUM:
-        # Palladium has traded $200 (2003) to $3 400 (2022); band kept wide.
-        return (100.0, 5_000.0)
-    if upper in _PLATINUM:
-        # Platinum has traded $400 (2002) to $2 250 (2008); band kept wide.
-        return (200.0, 3_000.0)
-    if upper in _CRUDE_OIL:
-        # Crude oil quoted in USD per barrel; range covers post-2000 extremes.
-        return (10.0, 250.0)
-    if upper in _COPPER:
-        # COMEX copper futures USD/lb. Wide enough to cover the 2026-04 spike
-        # to $6.40 yet still flag a 10× drift (would land >50).
-        return (0.3, 15.0)
-    if upper in _NATGAS:
-        # Henry-Hub natural gas USD/MMBtu. Wide enough to cover the 2008/2022
-        # ~$13 spikes yet still flag a 10× drift.
-        return (0.5, 25.0)
-    if upper in _BOND_FUTURE:
-        # Euro Bund Future trades roughly 110–180 as a price index.
-        return (80.0, 200.0)
-    if upper in _HIGH_RATE_FX:
-        # Pairs with a natural rate above 5 — prevent over-division by 100000.
-        return (5.0, 20.0)
-    if upper in _INDEX_RANGES:
-        return _INDEX_RANGES[upper]
-    if any(s in upper for s in _IDX_SUBSTRINGS):
-        # Generic fallback for unknown indices; deliberately wide.
-        return (100.0, 500_000.0)
-    # Standard 4-decimal FX pairs. Upper bound is 5.0 (not 15.0) so that a
-    # value stuck 10× too high — e.g. NZDUSD at 5.87 instead of 0.587 — is
-    # detected and corrected. Pairs whose natural rate exceeds 5 (SEK/NOK
-    # crosses) live in _HIGH_RATE_FX with their own (5.0, 20.0) band.
-    return (0.3, 5.0)
+    global _SHIPPED_BANDS
+    if bands is None:
+        if _SHIPPED_BANDS is None:
+            _SHIPPED_BANDS = load_price_bands()
+        bands = _SHIPPED_BANDS
+    return bands.band(symbol)
 
 
 # Candidate multiplicative corrections, ordered from strongest divide (1e-5)
@@ -232,6 +232,7 @@ def normalize_symbol(
     symbol: str,
     *,
     dry_run: bool = False,
+    bands: PriceBands | None = None,
 ) -> dict[str, int]:
     """Normalize all daily candle files for *symbol* in *sym_dir*.
 
@@ -244,11 +245,12 @@ def normalize_symbol(
         sym_dir: Directory for this symbol (e.g. ``cache_dir / "AUDNZD"``).
         symbol: Instrument symbol string used for range lookup.
         dry_run: If ``True``, report what would change without writing files.
+        bands: Expected price bands; the shipped example when ``None``.
 
     Returns:
         Dict with keys ``"fixed"``, ``"skipped"``, ``"errors"``.
     """
-    price_min, price_max = _expected_price_range(symbol)
+    price_min, price_max = _expected_price_range(symbol, bands)
     result: dict[str, int] = {"fixed": 0, "skipped": 0, "errors": 0}
 
     for year_dir in sorted(sym_dir.iterdir()):
@@ -332,6 +334,7 @@ def normalize_cache(
     symbols: list[str] | None = None,
     *,
     dry_run: bool = False,
+    bands: PriceBands | None = None,
 ) -> dict[str, dict[str, int]]:
     """Normalize all symbols (or a specified subset) in *cache_dir*.
 
@@ -339,6 +342,7 @@ def normalize_cache(
         cache_dir: Root of the cache directory.
         symbols: Symbols to process; defaults to every subdirectory.
         dry_run: If ``True``, no files are modified.
+        bands: Expected price bands; the shipped example when ``None``.
 
     Returns:
         Dict mapping symbol name to per-symbol result dicts.
@@ -352,6 +356,6 @@ def normalize_cache(
         if not sym_dir.is_dir():
             log.warning("Symbol directory not found: %s", sym_dir)
             continue
-        results[symbol] = normalize_symbol(sym_dir, symbol, dry_run=dry_run)
+        results[symbol] = normalize_symbol(sym_dir, symbol, dry_run=dry_run, bands=bands)
 
     return results

@@ -662,3 +662,79 @@ def test_normalize_cache_dry_run(tmp_path: Path) -> None:
     assert results["EURUSD"]["fixed"] == 1
     # Original wrong price must be untouched
     assert abs(_read_median_close(bid_path) - 110.0) < 0.01
+
+
+# ---------------------------------------------------------------------------
+# Bands are configuration (price_bands.example.toml, --bands)
+# ---------------------------------------------------------------------------
+
+
+def test_the_shipped_bands_ship_in_the_package() -> None:
+    from tradedesk_marketdata import normalize as nz
+
+    path = Path(nz.__file__).with_name(nz.PRICE_BANDS_EXAMPLE)
+    assert path.is_file()
+    shipped = nz.load_price_bands(path)
+    assert shipped == nz.load_price_bands()
+    assert shipped.default == (0.3, 5.0)
+    assert shipped.contains == (("IDX", (100.0, 500_000.0)),)
+    assert shipped.band("usa500idxusd") == (1_000.0, 10_000.0)  # exact symbol before IDX rule
+
+
+def test_custom_bands_change_what_normalize_corrects(tmp_path: Path) -> None:
+    from tradedesk_marketdata import normalize as nz
+
+    # 1.10 is a correct EURUSD price under the shipped bands, and left alone...
+    bid, _ = _make_cache_day(tmp_path, "EURUSD", 2026, 2, 10, 1.10, 1.11)
+    assert normalize_symbol(tmp_path / "EURUSD", "EURUSD")["fixed"] == 0
+    # ...but a file that says EURUSD lives in pips makes it 10^4 too small.
+    bands_file = tmp_path / "bands.toml"
+    bands_file.write_text("default = [0.3, 5.0]\n[symbols]\nEURUSD = [5000.0, 30000.0]\n")
+    bands = nz.load_price_bands(bands_file)
+
+    result = normalize_symbol(tmp_path / "EURUSD", "EURUSD", bands=bands)
+
+    assert result["fixed"] == 1
+    assert _read_median_close(bid) == pytest.approx(11000.0)
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ("[symbols]\nEURUSD = [1.0, 2.0]\n", "no default band"),
+        ("default = [5.0, 1.0]\n", "0 < low < high"),
+        ("default = [1.0]\n", "must be [low, high]"),
+        ('default = [0.3, 5.0]\n[[contains]]\npattern = "IDX"\n', "exactly pattern and band"),
+        ("default = [0.3, 5.0]\nbands = 1\n", "unknown key(s) bands"),
+        ("default = [\n", "not a TOML file"),
+    ],
+)
+def test_a_bands_file_that_breaks_the_schema_is_refused(tmp_path, body, message) -> None:
+    import re
+
+    from tradedesk_marketdata import normalize as nz
+
+    path = tmp_path / "bands.toml"
+    path.write_text(body)
+    with pytest.raises(nz.PriceBandsError, match=re.escape(message)):
+        nz.load_price_bands(path)
+
+
+def test_normalize_cli_takes_a_bands_file(tmp_path: Path, capsys) -> None:
+    from tradedesk_marketdata import normalize_cli
+
+    bid, _ = _make_cache_day(tmp_path, "EURUSD", 2026, 2, 10, 1.10, 1.11)
+    bands_file = tmp_path / "bands.toml"
+    bands_file.write_text("default = [0.3, 5.0]\n[symbols]\nEURUSD = [5000.0, 30000.0]\n")
+
+    rc = normalize_cli.main(["--cache-dir", str(tmp_path), "--bands", str(bands_file)])
+
+    assert rc == 0
+    assert _read_median_close(bid) == pytest.approx(11000.0)
+
+    bad = tmp_path / "bad.toml"
+    bad.write_text("default = [5.0, 1.0]\n")
+    with pytest.raises(SystemExit) as exc:
+        normalize_cli.main(["--cache-dir", str(tmp_path), "--bands", str(bad)])
+    assert exc.value.code == 2
+    assert "0 < low < high" in capsys.readouterr().err
