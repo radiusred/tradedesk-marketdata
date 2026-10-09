@@ -5,8 +5,9 @@ Tests for parallel.py — _export_worker and run_parallel_exports.
 from datetime import UTC, datetime
 from pathlib import Path
 
+import tradedesk_marketdata.export as ex
 import tradedesk_marketdata.parallel as par
-import tradedesk_marketdata.sources.dukascopy as dk
+from tradedesk_marketdata import sources
 from tradedesk_marketdata.parallel import ExportResult, ExportTask, _export_worker
 
 # ---------------------------------------------------------------------------
@@ -20,9 +21,9 @@ def _task(symbol: str = "EURUSD", tmp_path: Path | None = None) -> ExportTask:
         start_utc=datetime(2025, 1, 1, tzinfo=UTC),
         end_utc_inclusive=datetime(2025, 1, 1, tzinfo=UTC),
         resample_rule="1min",
-        price_divisor=1.0,
         cache_dir=None,
         out=tmp_path,
+        source=sources.create("dukascopy"),
     )
 
 
@@ -35,7 +36,7 @@ def test_export_worker_success_collects_both_output_csvs(monkeypatch, tmp_path):
     bid = tmp_path / "EURUSD_1MIN_bid.csv"
     ask = tmp_path / "EURUSD_1MIN_ask.csv"
 
-    monkeypatch.setattr(dk, "export_range", lambda **_: (bid, ask))
+    monkeypatch.setattr(ex, "export_range", lambda **_: (bid, ask))
 
     result = _export_worker(_task(tmp_path=tmp_path))
 
@@ -48,7 +49,7 @@ def test_export_worker_filters_none_from_output_csvs(monkeypatch, tmp_path):
     # One side produces no data (e.g. all-empty frames).
     bid = tmp_path / "EURUSD_1MIN_bid.csv"
 
-    monkeypatch.setattr(dk, "export_range", lambda **_: (bid, None))
+    monkeypatch.setattr(ex, "export_range", lambda **_: (bid, None))
 
     result = _export_worker(_task(tmp_path=tmp_path))
 
@@ -60,7 +61,7 @@ def test_export_worker_returns_failure_on_exception(monkeypatch, tmp_path):
     def bad_export(**_):
         raise RuntimeError("network error")
 
-    monkeypatch.setattr(dk, "export_range", bad_export)
+    monkeypatch.setattr(ex, "export_range", bad_export)
 
     result = _export_worker(_task(tmp_path=tmp_path))
 
@@ -115,26 +116,22 @@ def test_run_parallel_exports_empty_task_list(monkeypatch):
 def test_export_worker_forwards_timeouts_and_retries(monkeypatch, tmp_path):
     """A task carrying network settings passes them to export_range; one without
     leaves export_range's own defaults in force."""
-    from datetime import UTC, datetime
-
-    import tradedesk_marketdata.parallel as par
-
     seen: list[dict] = []
 
     def fake_export_range(**kwargs):
         seen.append(kwargs)
         return (None, None)
 
-    monkeypatch.setattr(dk, "export_range", fake_export_range)
+    monkeypatch.setattr(ex, "export_range", fake_export_range)
 
     common = dict(
         symbol="EURUSD",
         start_utc=datetime(2025, 7, 1, tzinfo=UTC),
         end_utc_inclusive=datetime(2025, 7, 1, tzinfo=UTC),
         resample_rule=None,
-        price_divisor=1.0,
         cache_dir=tmp_path,
         out=tmp_path,
+        source=sources.create("dukascopy"),
     )
     par._export_worker(par.ExportTask(**common, timeout=(15.0, 90.0), retries=5))
     par._export_worker(par.ExportTask(**common))
@@ -143,36 +140,27 @@ def test_export_worker_forwards_timeouts_and_retries(monkeypatch, tmp_path):
     assert "timeout" not in seen[1] and "retries" not in seen[1]
 
 
-def test_histdata_task_runs_the_histdata_export(monkeypatch, tmp_path: Path) -> None:
-    import tradedesk_marketdata.histdata as hd
+def test_export_worker_hands_the_task_source_to_the_framework(monkeypatch, tmp_path) -> None:
+    """The worker runs the framework with the task's configured source, whichever it is."""
+    seen: list[dict] = []
 
-    seen: dict = {}
-
-    def fake_histdata(**kwargs):
-        seen.update(kwargs)
+    def fake_export_range(**kwargs):
+        seen.append(kwargs)
         return (None, None)
 
-    def no_dukascopy(**_):
-        raise AssertionError("the Dukascopy export must not run for a histdata task")
+    monkeypatch.setattr(ex, "export_range", fake_export_range)
 
-    monkeypatch.setattr(hd, "export_range_histdata", fake_histdata)
-    monkeypatch.setattr(dk, "export_range", no_dukascopy)
-
-    task = ExportTask(
-        symbol="USA500IDXUSD",
-        start_utc=datetime(2015, 1, 1, tzinfo=UTC),
-        end_utc_inclusive=datetime(2015, 1, 31, tzinfo=UTC),
-        resample_rule=None,
-        price_divisor=1.0,
-        cache_dir=tmp_path,
-        out=tmp_path,
-        timeout=(5.0, 60.0),
-        retries=4,
-        source="histdata",
-    )
-    result = _export_worker(task)
-
-    assert result.success
-    assert seen["symbol"] == "USA500IDXUSD"
-    assert seen["timeout"] == (5.0, 60.0) and seen["retries"] == 4
-    assert "price_divisor" not in seen
+    for name in sources.names():
+        source = sources.create(name)
+        task = ExportTask(
+            symbol="EURUSD",
+            start_utc=datetime(2015, 1, 1, tzinfo=UTC),
+            end_utc_inclusive=datetime(2015, 1, 31, tzinfo=UTC),
+            resample_rule=None,
+            cache_dir=tmp_path,
+            out=tmp_path,
+            source=source,
+        )
+        assert _export_worker(task).success
+        assert seen[-1]["source"] is source
+        assert "price_divisor" not in seen[-1]  # a provider option travels inside the source

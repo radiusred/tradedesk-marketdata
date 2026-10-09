@@ -12,8 +12,8 @@ import pandas as pd
 import pytest
 from histdata_fixtures import month_zip
 
-from tradedesk_marketdata import histdata as hd
 from tradedesk_marketdata.cancel import cancellation
+from tradedesk_marketdata.sources import histdata as hd
 
 
 @pytest.fixture(autouse=True)
@@ -251,7 +251,7 @@ def test_fetch_retries_then_raises_when_the_download_is_not_a_zip(monkeypatch):
 
     monkeypatch.setattr(hd._SESSION, "get", lambda url, timeout: _Resp(text=_PAGE.format(tk="t")))
     monkeypatch.setattr(hd._SESSION, "post", fake_post)
-    monkeypatch.setattr(hd._ex, "RETRY_BASE_DELAY", 0.0)
+    monkeypatch.setattr(hd, "RETRY_BASE_DELAY", 0.0)
 
     with pytest.raises(hd.MonthFetchError, match="not a zip"):
         hd._fetch_month_zip(hd.lookup("USA500IDXUSD"), (2015, 1), retries=3)
@@ -266,7 +266,7 @@ def test_fetch_ends_backoff_early_when_cancelled(monkeypatch):
         return _Resp(status=503)
 
     monkeypatch.setattr(hd._SESSION, "get", failing_get)
-    monkeypatch.setattr(hd._ex, "RETRY_BASE_DELAY", 5.0)  # a sleep the test must not sit out
+    monkeypatch.setattr(hd, "RETRY_BASE_DELAY", 5.0)  # a sleep the test must not sit out
 
     threading.Timer(0.1, cancellation.set).start()
     start = time.time()

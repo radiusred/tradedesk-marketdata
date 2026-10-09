@@ -9,17 +9,18 @@ from pathlib import Path
 
 from rich.logging import RichHandler
 
-from .export import (
+from . import sources
+from .metadata import ExportMetadata, now_iso_utc, write_sidecar
+from .source import (
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_READ_TIMEOUT,
     DEFAULT_RETRIES,
+    SourceError,
 )
-from .histdata import HISTDATA_SYMBOLS, UnmappedSymbolError
-from .histdata import lookup as histdata_lookup
-from .metadata import ExportMetadata, now_iso_utc, write_sidecar
 from .sources.dukascopy import export_range
+from .sources.histdata import HISTDATA_SYMBOLS
 
-SOURCES = ("dukascopy", "histdata")
+SOURCES = tuple(sources.names())
 # Flags that only mean something for the Dukascopy datafeed.
 _DUKASCOPY_ONLY = ("--price-divisor", "--probe", "--probe-ticks")
 
@@ -233,11 +234,17 @@ def main(argv: list[str] | None = None) -> int:
                 f"{', '.join(given)}: Dukascopy-only, not valid with --source histdata "
                 "(HistData prices are scaled into the cache's units by the symbol table)"
             )
+    options = (
+        {"price_divisor": args.price_divisor, "probe": args.probe, "probe_ticks": args.probe_ticks}
+        if args.source == "dukascopy"
+        else {}
+    )
+    source = sources.create(args.source, options)
+    try:
         for symbol in args.symbols:
-            try:
-                histdata_lookup(symbol)
-            except UnmappedSymbolError as e:
-                parser.error(str(e))
+            source.check_symbol(symbol)
+    except SourceError as e:
+        parser.error(str(e))
     price_divisor = 1.0 if args.price_divisor is None else args.price_divisor
     probe_ticks = 10 if args.probe_ticks is None else args.probe_ticks
 
@@ -299,13 +306,12 @@ def main(argv: list[str] | None = None) -> int:
             start_utc=start_utc,
             end_utc_inclusive=end_utc,
             resample_rule=args.resample,
-            price_divisor=price_divisor,
             cache_dir=cache_dir,
             out=out,
+            source=source,
             commit_partial_after_days=args.commit_partial_after_days,
             timeout=timeout,
             retries=args.retries,
-            source=args.source,
         )
         for symbol in args.symbols
     ]
@@ -316,6 +322,7 @@ def main(argv: list[str] | None = None) -> int:
         # Write metadata for successful exports
         for result in results:
             if result.success:
+                described = source.describe(result.symbol)
                 for output_csv in result.output_csvs:
                     price_side = "bid" if output_csv.stem.endswith("_bid") else "ask"
                     params: dict[str, object] = {
@@ -323,21 +330,15 @@ def main(argv: list[str] | None = None) -> int:
                         "date_to": args.date_to,
                         "resample": args.resample,
                         "price_side": price_side,
+                        **described.params,
                     }
-                    divisor = float(price_divisor)
-                    if args.source == "histdata":
-                        # HistData prices are multiplied into the cache's units; the
-                        # divisor-equivalent keeps "cache price = source price / divisor".
-                        scale = histdata_lookup(result.symbol).scale
-                        divisor = 1.0 / scale
-                        params["scale_factor"] = scale
                     meta = ExportMetadata(
                         schema_version="1",
-                        source=args.source,
+                        source=source.name,
                         symbol=result.symbol,
                         data_type="candles",
                         timestamp_format="iso8601_utc",
-                        price_divisor=divisor,
+                        price_divisor=float(described.price_divisor),
                         generated_at=now_iso_utc(),
                         params=params,
                     )

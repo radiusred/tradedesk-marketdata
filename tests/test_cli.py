@@ -274,8 +274,8 @@ _RANGE = ["--from", "2015-01-01", "--to", "2015-01-31"]
 def test_source_defaults_to_dukascopy(monkeypatch) -> None:
     captured = _capture_tasks(monkeypatch)
     assert cli.main(["--symbols", "EURUSD", *_RANGE, "--no-cache"]) == 0
-    assert [t.source for t in captured] == ["dukascopy"]
-    assert captured[0].price_divisor == 1.0
+    assert [t.source.name for t in captured] == ["dukascopy"]
+    assert captured[0].source.price_divisor == 1.0
 
 
 def test_source_histdata_reaches_the_export_tasks(monkeypatch) -> None:
@@ -284,7 +284,7 @@ def test_source_histdata_reaches_the_export_tasks(monkeypatch) -> None:
         ["--source", "histdata", "--symbols", "USA500IDXUSD", "EURUSD", *_RANGE, "--no-cache"]
     )
     assert rc == 0
-    assert [t.source for t in captured] == ["histdata", "histdata"]
+    assert [t.source.name for t in captured] == ["histdata", "histdata"]
 
 
 def test_histdata_refuses_dukascopy_only_flags(monkeypatch, capsys) -> None:

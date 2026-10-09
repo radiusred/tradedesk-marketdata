@@ -6,7 +6,7 @@ import io
 import zipfile
 from datetime import UTC, date, datetime, timedelta
 
-from tradedesk_marketdata import histdata as hd
+from tradedesk_marketdata.sources import histdata as hd
 
 
 def est_line(ts_utc: datetime, bid: str, ask: str) -> str:
