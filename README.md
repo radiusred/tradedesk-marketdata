@@ -374,7 +374,7 @@ The shipped map:
 | Cache symbol | HistData | Scale | First month | Verified |
 |---|---|---|---|---|
 | USA500IDXUSD | SPXUSD | 1 | 2010-11 | yes |
-| DEUIDXEUR | GRXEUR | 1 | 2010-11 | yes |
+| DEUIDXEUR | GRXEUR | 1 | 2010-11 | yes; 2020-06-17..2023-12-05 excluded (below) |
 | GBRIDXGBP | UKXGBP | 1 | 2010-11 | yes |
 | JPNIDXJPY | JPXJPY | 1 | 2010-11 | yes |
 | AUSIDXAUD | AUXAUD | 1 | 2010-11 | yes |
@@ -392,6 +392,38 @@ The shipped map:
 | AUDNZD, GBPAUD | same | 10000 | 2007-09 | yes |
 | NZDCAD | NZDCAD | 10000 | 2008-03 | yes |
 | EURSEK | EURSEK | 10000 | 2008-08 | **no** |
+
+The map's `[histdata]` section holds settings for every instrument:
+`max_month_join_step` (default `0.7`) is the threshold of the month-join level
+check below.
+
+#### Known defects and the provider's guards
+
+- **GRXEUR is not the DAX from 2020-06-17 to 2023-12-05.** Over that span
+  HistData's `GRXEUR` runs at about 0.26× the DAX, its session ends an hour
+  earlier, and its levels track the Euro Stoxx 50. A daily close ratio against
+  a Dukascopy cache is 1.00 up to 2020-06-16, 0.26 from 2020-06-17, and 1.00
+  again from 2023-12-06. The shipped map excludes the span for DEUIDXEUR, so
+  those days get no day files from HistData, only `excluded` records, and
+  another source can fill them. **Existing HistData caches of DEUIDXEUR** hold
+  Euro Stoxx 50 levels on those days. Delete the day files from 2020-06-17 to
+  2023-12-05 and refill them from another source, for example
+  `--source dukascopy`.
+- **The month-join level check.** When a month file is decoded, its first
+  trading day's close is compared with the last accepted close before it: the
+  previous month's in the same run, or the nearest committed day in the
+  cache. If the larger is more than `1 + max_month_join_step` times the
+  smaller, the month is refused. The refusal is named in the log and the
+  end-of-run summary (`refused=N`), and the days the month feeds stay
+  uncommitted. A refused month is never a reference, so a substitution
+  lasting several months is refused until the level returns. Excluded days
+  are left out on both sides.
+
+  The check is HistData's own guard, distinct from the framework's scale
+  sentry. The sentry compares a day with its neighbours already in the
+  cache, so it cannot see a substitution that fills a fresh cache
+  consistently. If a refused move is real, raise `max_month_join_step` in
+  your copy of the map. If it is a substitution, add an exclusion span.
 
 #### How a HistData run fills the cache
 
