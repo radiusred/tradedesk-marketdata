@@ -160,7 +160,9 @@ def test_export_worker_hands_the_task_source_to_the_framework(monkeypatch, tmp_p
             cache_dir=tmp_path,
             out=tmp_path,
             source=source,
+            keep_raw=True,
         )
         assert _export_worker(task).success
         assert seen[-1]["source"] is source
+        assert seen[-1]["keep_raw"] is True
         assert "price_divisor" not in seen[-1]  # a provider option travels inside the source

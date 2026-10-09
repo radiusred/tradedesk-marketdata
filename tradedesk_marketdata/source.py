@@ -36,6 +36,7 @@ This module imports no source; sources import it and the framework.
 from __future__ import annotations
 
 import logging
+import shutil
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -202,17 +203,37 @@ class RunContext:
     commit_partial_after_days: int = 7
     timeout: tuple[float, float] = (DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT)
     retries: int = DEFAULT_RETRIES
+    keep_raw: bool = False
+
+    def raw_path(self, relpath: str) -> Path | None:
+        """Where ``--keep-raw`` retains a raw unit: ``{cache}/{SYMBOL}/_raw/{source}/{relpath}``."""
+        if self.cache_dir is None:
+            return None
+        return self.cache_dir / self.symbol / "_raw" / self.source_name / relpath
 
     def retire_raw(self, path: Path, relpath: str) -> None:
-        """Dispose of a staged raw unit whose days are committed: it is deleted.
+        """Dispose of a staged raw unit whose days are committed.
 
-        ``relpath`` names the unit below the symbol directory. A unit that is
-        not there is ignored.
+        With ``keep_raw`` it moves to :meth:`raw_path` (replacing an older
+        copy), so a later decode fix can be applied without fetching it
+        again; otherwise it is deleted. A unit that is not there is ignored.
         """
+        if not path.exists():
+            return
+        kept = self.raw_path(relpath) if self.keep_raw else None
         try:
-            path.unlink(missing_ok=True)
+            if kept is None:
+                path.unlink()
+            else:
+                kept.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(path, kept)
         except OSError:
-            log.warning(f"{self.symbol}: could not delete {path}")
+            log.warning(f"{self.symbol}: could not {'retain' if kept else 'delete'} {path}")
+
+    def kept_raw(self, relpath: str) -> Path | None:
+        """A raw unit an earlier ``--keep-raw`` run retained, if there is one."""
+        path = self.raw_path(relpath)
+        return path if path is not None and path.is_file() else None
 
 
 @dataclass(frozen=True)

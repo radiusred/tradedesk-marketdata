@@ -131,3 +131,32 @@ def test_cleanup_handles_multiple_months(tmp_path: Path) -> None:
 
     assert not empty1.exists()
     assert not empty2.exists()
+
+
+def test_cleanup_with_keep_raw_retains_a_redundant_days_bi5(tmp_path: Path) -> None:
+    from datetime import UTC, datetime
+
+    from tradedesk_marketdata.source import RunContext
+
+    symbol = "EURUSD"
+    day_dir = tmp_path / symbol / "2025" / "00" / "15"
+    day_dir.mkdir(parents=True)
+    (day_dir / "10h_ticks.bi5").write_bytes(b"ticks")
+    (day_dir / "11h_ticks.bi5").write_bytes(b"")
+    for side in ("bid", "ask"):
+        (day_dir.parent / f"15_{side}.csv.zst").write_bytes(b"committed")
+    ctx = RunContext(
+        source_name="dukascopy",
+        symbol=symbol,
+        start_utc=datetime(2025, 1, 15, tzinfo=UTC),
+        end_utc_inclusive=datetime(2025, 1, 15, tzinfo=UTC),
+        cache_dir=tmp_path,
+        keep_raw=True,
+    )
+
+    dk._cleanup_stale_day_dirs(tmp_path, symbol, today=date(2026, 6, 6), ctx=ctx)
+
+    assert not day_dir.exists()
+    kept = tmp_path / symbol / "_raw" / "dukascopy" / "2025" / "00" / "15"
+    assert (kept / "10h_ticks.bi5").read_bytes() == b"ticks"
+    assert (kept / "11h_ticks.bi5").read_bytes() == b""

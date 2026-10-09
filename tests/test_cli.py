@@ -346,6 +346,7 @@ def test_dukascopy_tasks_carry_the_configured_source(monkeypatch) -> None:
     assert task.source.name == "dukascopy"
     assert isinstance(task.source, dk.DukascopySource)
     assert task.source.price_divisor == 1.0  # the source's own default
+    assert task.keep_raw is False
 
 
 def test_dukascopy_options_reach_the_source(monkeypatch) -> None:
@@ -365,6 +366,13 @@ def test_source_histdata_reaches_the_export_tasks(monkeypatch) -> None:
     assert rc == 0
     assert [t.source.name for t in captured] == ["histdata", "histdata"]
     assert captured[0].source is captured[1].source  # one configured source per run
+
+
+def test_keep_raw_reaches_the_export_tasks(monkeypatch) -> None:
+    captured = _capture_tasks(monkeypatch)
+    rc = cli.main(["--source", "histdata", "--symbols", "EURUSD", *_RANGE, "--keep-raw"])
+    assert rc == 0
+    assert captured[0].keep_raw is True
 
 
 def test_a_source_option_is_refused_with_any_other_source(monkeypatch, capsys) -> None:
@@ -462,6 +470,7 @@ def test_help_is_built_from_the_registry(capsys) -> None:
             assert f"{name} options (--source {name} only)" in out
         for opt in cls.options:
             assert opt.flag in out
+    assert "--keep-raw" in out
 
 
 def test_cli_module_names_no_source() -> None:
