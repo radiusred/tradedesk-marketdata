@@ -606,6 +606,10 @@ class _HistDataRun(SourceRun):
         return ticks
 
     def decide(self, day: date, *, has_data: bool) -> Decision:
+        # TODO(#83): a day inside one of the instrument's exclusion spans (from
+        # the symbol map) is answered here with Exclude(reason, source_unit=...),
+        # and excludes(day) is overridden to answer from the same spans, so a
+        # recorded exclusion is not fetched again until its span is removed.
         needed = _months_for_day(day)
         states = [self.status[m] for m in needed]
         if "failed" in states:

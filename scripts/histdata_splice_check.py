@@ -64,7 +64,11 @@ def load_day(path: Path) -> pd.DataFrame:
 
 
 def load_sources(cache: Path, symbol: str) -> dict[str, str]:
-    """Day (ISO) -> recorded source, from the symbol's ``_sources.jsonl``."""
+    """Day (ISO) -> recorded source, from the symbol's ``_sources.jsonl``.
+
+    Only commit records count: an ``"status": "excluded"`` record says the
+    source wrote nothing for the day.
+    """
     path = cache / symbol / "_sources.jsonl"
     out: dict[str, str] = {}
     if not path.exists():
@@ -73,6 +77,8 @@ def load_sources(cache: Path, symbol: str) -> dict[str, str]:
         try:
             rec = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        if rec.get("status", "committed") != "committed":
             continue
         out.setdefault(rec["day"], rec["source"])  # first committed wins
     return out
