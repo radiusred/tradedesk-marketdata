@@ -182,6 +182,15 @@ Every committed day is recorded in the symbol's append-only
 zip(s) or the hour set the day was built from. Days committed before this
 manifest existed have no record and were written by Dukascopy.
 
+A source can also *exclude* a day whose data it knows to be wrong. It then
+writes no day files and appends a record with `"status": "excluded"` instead
+(`{"day", "source", "status", "reason", "decided_at", "source_unit"}`); a
+record without `status` is a commit. Another source can still fill the
+excluded day. The same source does not fetch it again while it still excludes
+it, and fetches it like any other missing day once the exclusion is removed
+from its configuration. The end-of-run summary counts `excluded=` (this run)
+and `already_excluded=` (recorded earlier).
+
 ### Splicing sources
 
 HistData and Dukascopy are different liquidity providers. A series that is

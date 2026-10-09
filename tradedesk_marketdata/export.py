@@ -44,6 +44,7 @@ from .source import (
     DEFAULT_RETRIES,
     Commit,
     Decision,
+    Exclude,
     Leave,
     RunContext,
     Source,
@@ -286,6 +287,50 @@ def _append_source_manifest(
         f.write(json.dumps(record) + "\n")
 
 
+def _append_excluded_record(
+    cache_dir: Path,
+    symbol: str,
+    day: date,
+    *,
+    source: str,
+    reason: str,
+    source_unit: str,
+) -> None:
+    """Record that ``source`` excluded a day: it wrote no day files for it, and why.
+
+    Same file and discipline as a commit record. A record with
+    ``"status": "excluded"`` is not a commit; a record without ``status`` is.
+    """
+    manifest = _source_manifest_path(cache_dir, symbol)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "day": day.isoformat(),
+        "source": source,
+        "status": "excluded",
+        "reason": reason,
+        "decided_at": datetime.now(UTC).isoformat(),
+        "source_unit": source_unit,
+    }
+    with open(manifest, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+
+
+def _recorded_exclusions(cache_dir: Path, symbol: str, source: str) -> set[date]:
+    """The days ``source`` has recorded as excluded in the symbol's ``_sources.jsonl``."""
+    manifest = _source_manifest_path(cache_dir, symbol)
+    if not manifest.exists():
+        return set()
+    days: set[date] = set()
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        try:
+            rec = json.loads(line)
+            if rec.get("status") == "excluded" and rec.get("source") == source:
+                days.add(date.fromisoformat(rec["day"]))
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue
+    return days
+
+
 def _write_range_outputs(
     symbol: str,
     bid_frames: list[pd.DataFrame],
@@ -424,6 +469,11 @@ def export_range(
     - every committed day is recorded in ``_sources.jsonl`` with the source's
       name, scale factor and unit(s), and a partial day in
       ``_partial_days.jsonl``
+    - a day the source excludes (:class:`~tradedesk_marketdata.source.Exclude`)
+      gets no day files and an ``excluded`` record in ``_sources.jsonl`` with
+      the reason; later runs of the same source do not plan or fetch it while
+      the source's ``excludes(day)`` still gives a reason, and plan it again
+      once the exclusion is removed from the source's configuration
     - with ``keep_raw`` the source retains its fetched units under
       ``{cache}/{SYMBOL}/_raw/{source}/`` after commit instead of deleting them
 
@@ -459,20 +509,32 @@ def export_range(
 
     run = source.open(ctx)
 
+    # A day this source recorded as excluded stays excluded while the source
+    # still says why; it is neither fetched nor recorded again.
+    already_excluded: set[date] = set()
+    if cache_dir is not None and pending:
+        recorded = _recorded_exclusions(cache_dir, symbol, source.name)
+        already_excluded = {d for d in pending if d in recorded and run.excludes(d) is not None}
+        if already_excluded:
+            log.info(
+                f"{symbol}: {len(already_excluded)} day(s) recorded as excluded by "
+                f"{source.name}; not fetched again"
+            )
+            pending = [d for d in pending if d not in already_excluded]
+
     # Early exit: every day is cached, and there is nothing (more) to write.
     if cache_dir is not None and days and not pending:
+        cached = f"all {len(days)} days cached"
+        if already_excluded:
+            cached += f" or recorded as excluded ({len(already_excluded)})"
         if resample_rule is None:
-            log.info(
-                f"{symbol}: all {len(days)} days cached and no resample requested; nothing to do"
-            )
+            log.info(f"{symbol}: {cached} and no resample requested; nothing to do")
             return (None, None)
         rule_label = resample_rule.replace(" ", "").upper()
         bid_csv = out / f"{symbol}_{rule_label}_bid.csv"
         ask_csv = out / f"{symbol}_{rule_label}_ask.csv"
         if bid_csv.exists() and ask_csv.exists():
-            log.info(
-                f"{symbol}: all {len(days)} days cached and output CSVs exist; skipping export"
-            )
+            log.info(f"{symbol}: {cached} and output CSVs exist; skipping export")
             return (bid_csv, ask_csv)
 
     units = list(run.plan(pending))
@@ -520,6 +582,7 @@ def export_range(
             "committed",
             "committed_empty",
             "committed_partial",
+            "excluded",
             "rejected_scale_sentry",
             "left_uncommitted",
         ),
@@ -535,6 +598,19 @@ def export_range(
             counts["left_uncommitted"] += 1
             advance(cache_task)
             log.debug(f"{symbol}: {day.isoformat()} left uncommitted ({decision.reason})")
+            return
+        if isinstance(decision, Exclude):
+            counts["excluded"] += 1
+            advance(cache_task)
+            _append_excluded_record(
+                cache_dir,
+                symbol,
+                day,
+                source=source.name,
+                reason=decision.reason,
+                source_unit=decision.source_unit,
+            )
+            log.info(f"{symbol}: {day.isoformat()} excluded ({decision.reason}); not committed")
             return
         assert isinstance(decision, Commit)
         bid_df = _assemble_day(bid_frames)
@@ -665,6 +741,7 @@ def export_range(
             f"{symbol}: days total={len(days)}, already_cached={len(already)}, "
             f"committed={counts['committed']} (empty={counts['committed_empty']}, "
             f"partial={counts['committed_partial']}), "
+            f"excluded={counts['excluded']}, already_excluded={len(already_excluded)}, "
             f"rejected_scale_sentry={counts['rejected_scale_sentry']}, "
             f"left_uncommitted={counts['left_uncommitted']}"
         )

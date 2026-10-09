@@ -22,8 +22,9 @@ A source is a :class:`Source` subclass registered by name in
    ``ask_vol`` in the cache's raw price units; ``None`` when the unit has none.
 4. ``decide(day, has_data)``: once every unit of a day has been decoded,
    whether the day may be committed now (:class:`Commit`, possibly as a
-   partial day), must be left for a later run (:class:`Leave`), or should be
-   asked again after the next unit (:class:`Wait`).
+   partial day), must be left for a later run (:class:`Leave`), should be
+   asked again after the next unit (:class:`Wait`), or must never be
+   committed from this source and is recorded as such (:class:`Exclude`).
 5. ``committed(day, empty)``: after the framework wrote a day, its provenance
    for ``_sources.jsonl``; the source removes or retains (``--keep-raw``) the
    raw units it no longer needs.
@@ -135,7 +136,25 @@ class Wait:
     reason: str
 
 
-Decision = Commit | Leave | Wait
+@dataclass(frozen=True)
+class Exclude:
+    """Never commit this day from this source: its data is known to be wrong.
+
+    Unlike :class:`Leave`, the outcome is recorded. The framework writes no
+    day files and appends an ``excluded`` record to ``_sources.jsonl``
+    (``reason`` and ``source_unit`` as given), so another source can still
+    fill the day and a reader of the manifest can see why this one did not.
+    The day is not asked about again in the run. In later runs it is not
+    planned or fetched while :meth:`SourceRun.excludes` still gives a reason
+    for it; once that stops (the exclusion was removed from the source's
+    configuration) the day is pending like any other.
+    """
+
+    reason: str
+    source_unit: str = "none"
+
+
+Decision = Commit | Leave | Wait | Exclude
 
 
 @dataclass(frozen=True)
@@ -283,6 +302,15 @@ class SourceRun(ABC):
     @abstractmethod
     def decide(self, day: date, *, has_data: bool) -> Decision:
         """Whether a day whose units are all decoded may be committed now."""
+
+    def excludes(self, day: date) -> str | None:
+        """Why this source still excludes ``day``, or ``None`` (the default).
+
+        Asked only for a day this source has already recorded as excluded:
+        while it answers with a reason the day is not planned again; once it
+        answers ``None`` the exclusion is lifted and the day is pending.
+        """
+        return None
 
     @abstractmethod
     def committed(self, day: date, *, empty: bool) -> Provenance:

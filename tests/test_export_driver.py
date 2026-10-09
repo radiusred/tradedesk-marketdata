@@ -16,6 +16,7 @@ import pytest
 import tradedesk_marketdata.export as ex
 from tradedesk_marketdata.source import (
     Commit,
+    Exclude,
     Leave,
     Partial,
     Provenance,
@@ -67,6 +68,10 @@ class ToyRun(SourceRun):
         answers = self.source.decisions.get(day, [Commit()])
         return answers.pop(0) if len(answers) > 1 else answers[0]
 
+    def excludes(self, day):
+        self.source.calls.append(("excludes", day))
+        return self.source.still_excluded.get(day)
+
     def committed(self, day, *, empty):
         self.source.calls.append(("committed", day, empty))
         return Provenance(scale_factor=2.0, source_unit=f"toy-{day.isoformat()}")
@@ -89,6 +94,7 @@ class ToySource(Source):
         self.workers = workers
         self.fetch_delays = fetch_delays or {}
         self.refuse = refuse
+        self.still_excluded: dict[date, str] = {}
         self.calls: list[tuple] = []
         self.fetched: list[int] = []
         self.lock = threading.Lock()
@@ -285,3 +291,92 @@ def test_the_tick_split_of_a_sorted_frame_skips_empty_days() -> None:
 
     assert [d for d, _ in parts] == [D1, D3]
     assert parts[0][1].index[0] < pd.Timestamp(D1 + timedelta(days=1), tz="UTC")
+
+
+# ---------------------------------------------------------------------------
+# Exclude: a day the source refuses to commit, on the record
+# ---------------------------------------------------------------------------
+
+
+def _excluding_source() -> ToySource:
+    units = [ToyUnit(1, (D1,)), ToyUnit(2, (D2,))]
+    ticks = {1: _ticks(D1, 10, 5.0), 2: _ticks(D2, 10, 5.0)}
+    reason = "toy feed carries another instrument here"
+    source = ToySource(units, ticks, decisions={D2: [Exclude(reason, source_unit="toy-unit-2")]})
+    source.still_excluded = {D2: reason}
+    return source
+
+
+def test_an_excluded_day_is_recorded_but_never_written(tmp_path, caplog):
+    source = _excluding_source()
+
+    with caplog.at_level("INFO"):
+        _export(source, tmp_path, last=D2)
+
+    assert _committed(tmp_path, D1)
+    for side in ("bid", "ask"):
+        assert not ex._daily_candle_path(tmp_path / "cache", "TOYUSD", D2, side).exists()
+    assert ("committed", D2, False) not in source.calls
+    records = _jsonl(ex._source_manifest_path(tmp_path / "cache", "TOYUSD"))
+    [excluded] = [r for r in records if r.get("status") == "excluded"]
+    assert set(excluded) == {"day", "source", "status", "reason", "decided_at", "source_unit"}
+    assert excluded["day"] == "2024-01-03" and excluded["source"] == "toy"
+    assert excluded["reason"] == "toy feed carries another instrument here"
+    assert excluded["source_unit"] == "toy-unit-2"
+    assert datetime.fromisoformat(excluded["decided_at"]).tzinfo is not None
+    # The commit record keeps its shape: no status means committed.
+    [committed] = [r for r in records if "status" not in r]
+    assert committed["day"] == "2024-01-02"
+    assert "excluded=1, already_excluded=0" in caplog.text
+    assert [c[1] for c in source.calls if c[0] == "decide"] == [D1, D2]  # asked once
+
+
+def test_an_excluded_day_is_not_fetched_again_while_the_source_still_excludes_it(tmp_path, caplog):
+    _export(_excluding_source(), tmp_path, last=D2)
+    rerun = _excluding_source()
+
+    with caplog.at_level("INFO"):
+        _export(rerun, tmp_path, last=D2)
+
+    # D1 committed and D2 recorded as excluded: nothing left to plan or fetch.
+    assert not any(c[0] == "plan" for c in rerun.calls)
+    assert rerun.fetched == []
+    assert ("excludes", D2) in rerun.calls
+    records = _jsonl(ex._source_manifest_path(tmp_path / "cache", "TOYUSD"))
+    assert len([r for r in records if r.get("status") == "excluded"]) == 1  # not re-recorded
+    assert "1 day(s) recorded as excluded by toy; not fetched again" in caplog.text
+    assert "all 2 days cached or recorded as excluded (1)" in caplog.text
+
+
+def test_a_recorded_exclusion_is_counted_in_a_run_that_still_has_work(tmp_path, caplog):
+    _export(_excluding_source(), tmp_path, last=D2)
+    rerun = _excluding_source()
+    rerun.units.append(ToyUnit(3, (D3,)))
+
+    with caplog.at_level("INFO"):
+        _export(rerun, tmp_path, last=D3)
+
+    assert ("plan", (D3,)) in rerun.calls
+    assert rerun.fetched == [3]
+    assert "excluded=0, already_excluded=1" in caplog.text
+
+
+def test_lifting_an_exclusion_makes_the_day_pending_again(tmp_path):
+    _export(_excluding_source(), tmp_path, last=D2)
+    lifted = ToySource([ToyUnit(2, (D2,))], {2: _ticks(D2, 10, 5.0)})  # no exclusion now
+
+    _export(lifted, tmp_path, last=D2)
+
+    assert lifted.fetched == [2]
+    assert _committed(tmp_path, D2)
+
+
+def test_another_source_may_fill_a_day_one_source_excluded(tmp_path):
+    _export(_excluding_source(), tmp_path, last=D2)
+    other = ToySource([ToyUnit(2, (D2,))], {2: _ticks(D2, 10, 5.0)})
+    other.name = "other"  # an instance attribute: a different source's records
+
+    _export(other, tmp_path, last=D2)
+
+    assert _committed(tmp_path, D2)
+    assert ("excludes", D2) not in other.calls  # toy's exclusion is not other's

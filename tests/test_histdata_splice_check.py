@@ -68,6 +68,21 @@ def test_only_compares_days_recorded_as_the_right_source(splice, tmp_path):
     assert res["status"] == "NO_DUKASCOPY_DATA"
 
 
+def test_an_excluded_record_is_not_a_source_for_the_day(splice, tmp_path):
+    cache = tmp_path / "main"
+    d = date(2020, 1, 6)
+    _write_day(cache, "EURUSD", d, 11000.0, source=None)
+    manifest = ex._source_manifest_path(cache, "EURUSD")
+    manifest.write_text(
+        json.dumps({"day": d.isoformat(), "source": "histdata", "status": "excluded"}) + "\n"
+    )
+    ex._append_source_manifest(
+        cache, "EURUSD", d, source="dukascopy", scale_factor=1.0, source_unit="test"
+    )
+
+    assert splice.load_sources(cache, "EURUSD") == {d.isoformat(): "dukascopy"}
+
+
 def test_lists_the_joins_between_sources_in_the_main_cache(splice, tmp_path):
     main = tmp_path / "main"
     _write_day(main, "EURUSD", date(2019, 12, 30), 11200.0, source="histdata")
