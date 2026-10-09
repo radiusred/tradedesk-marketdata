@@ -323,6 +323,33 @@ def test_resample_writes_range_csvs_from_histdata_days(jan_2015, tmp_path):
     assert len(bid) == 44  # 22 trading hours x 2 days
 
 
+def test_keep_raw_retains_a_fully_committed_months_zip(jan_2015, tmp_path):
+    cache = tmp_path / "cache"
+    _run(cache, date(2015, 1, 1), date(2015, 2, 1), keep_raw=True)
+
+    # January's file covers 2015-01-01..02-01, all committed: retained, not deleted.
+    assert not hd._zip_path(cache, SYMBOL, (2015, 1)).exists()
+    kept = cache / SYMBOL / "_raw" / "histdata" / "201501.zip"
+    assert kept.exists()
+    # December's covers days not committed yet: it stays staged.
+    assert hd._zip_path(cache, SYMBOL, (2014, 12)).exists()
+
+
+def test_a_kept_month_zip_is_read_instead_of_fetched(jan_2015, tmp_path):
+    cache = tmp_path / "cache"
+    _run(cache, date(2015, 1, 1), date(2015, 2, 1), keep_raw=True)
+    for d in _days(date(2015, 1, 5), date(2015, 1, 9)):
+        for side in ("bid", "ask"):
+            ex._daily_candle_path(cache, SYMBOL, d, side).unlink()
+    jan_2015.calls.clear()
+
+    _run(cache, date(2015, 1, 5), date(2015, 1, 9))
+
+    assert jan_2015.calls == []
+    assert all(_committed(cache, d) for d in _days(date(2015, 1, 5), date(2015, 1, 9)))
+    assert (cache / SYMBOL / "_raw" / "histdata" / "201501.zip").exists()
+
+
 # ---------------------------------------------------------------------------
 # Cancellation
 # ---------------------------------------------------------------------------

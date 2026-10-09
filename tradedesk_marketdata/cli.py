@@ -122,6 +122,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable caching raw downloads and daily candles and always re-download",
     )
     p.add_argument(
+        "--keep-raw",
+        action="store_true",
+        help="Keep each fetched raw unit after its days are committed, under "
+        "{cache}/{SYMBOL}/_raw/{source}/, so a later decode fix can be applied by re-decoding "
+        "locally instead of fetching again; a kept unit is read from there before any request. "
+        "Default: delete raw units once their days are committed",
+    )
+    p.add_argument(
         "--workers",
         type=int,
         default=4,
@@ -301,6 +309,7 @@ def main(argv: list[str] | None = None) -> int:
             commit_partial_after_days=args.commit_partial_after_days,
             timeout=timeout,
             retries=args.retries,
+            keep_raw=args.keep_raw,
         )
         for symbol in args.symbols
     ]

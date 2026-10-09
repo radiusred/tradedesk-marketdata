@@ -38,6 +38,7 @@ class ExportTask:
     commit_partial_after_days: int = 7
     timeout: tuple[float, float] | None = None
     retries: int | None = None
+    keep_raw: bool = False
 
 
 @dataclass
@@ -71,6 +72,7 @@ def _export_worker(task: ExportTask, progress: Progress | None = None) -> Export
             commit_partial_after_days=task.commit_partial_after_days,
             out=task.out,
             progress=progress,
+            keep_raw=task.keep_raw,
             **network,  # type: ignore[arg-type]
         )
         output_csvs = [p for p in (bid_csv, ask_csv) if p is not None]

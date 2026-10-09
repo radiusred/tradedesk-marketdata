@@ -396,6 +396,7 @@ def _cleanup_stale_day_dirs(
     *,
     today: date | None = None,
     commit_partial_after_days: int = 7,
+    ctx: RunContext | None = None,
 ) -> None:
     """Remove leftover ``.bi5`` day directories that are redundant or empty.
 
@@ -417,7 +418,9 @@ def _cleanup_stale_day_dirs(
     consumer's ``_check_old_format`` guard hard-fails any backtest touching the
     day. Re-running the export now repairs it (matching the documented
     "re-run tradedesk-md-export" remediation). The raw ``.bi5`` are losslessly
-    reproducible, so removing them once candles exist is safe.
+    reproducible, so removing them once candles exist is safe. With
+    ``--keep-raw`` (``ctx.keep_raw``) they are retained under ``_raw/``
+    instead, as a commit would have done.
 
     The third case covers weekend / market-holiday days where every
     fetched hour returned no ticks: each ``.bi5`` is written as a 0-byte file, so
@@ -459,6 +462,10 @@ def _cleanup_stale_day_dirs(
                 bid_csv = month_dir / f"{day_dir.name}_bid.csv.zst"
                 ask_csv = month_dir / f"{day_dir.name}_ask.csv.zst"
                 if bid_csv.exists() and ask_csv.exists():
+                    if ctx is not None and ctx.keep_raw:
+                        for f in day_files:
+                            rel = f"{year_dir.name}/{month_dir.name}/{day_dir.name}/{f.name}"
+                            ctx.retire_raw(f, rel)
                     try:
                         shutil.rmtree(day_dir)
                     except OSError:
@@ -535,6 +542,7 @@ class _DukascopyRun(SourceRun):
                 self.symbol,
                 today=self.today,
                 commit_partial_after_days=ctx.commit_partial_after_days,
+                ctx=ctx,
             )
 
     def _staged(self, hour: datetime) -> Path | None:
@@ -561,6 +569,10 @@ class _DukascopyRun(SourceRun):
         hour = unit.start
         try:
             cache_path = self._staged(hour)
+            if cache_path is not None and not cache_path.exists():
+                kept = self.ctx.kept_raw(_bi5_relpath(hour))
+                if kept is not None:
+                    return kept.read_bytes()
             return _download_bi5(
                 _dukascopy_tick_url(self.symbol, hour),
                 cache_path=cache_path,
@@ -625,13 +637,13 @@ class _DukascopyRun(SourceRun):
             ticks = _decode_ticks(hour, raw, price_format=fmt, price_divisor=self.price_divisor)
         except lzma.LZMAError:
             # A corrupt file (truncated download, bad staging write): fetch it once more.
-            suspect = self._staged(hour)
-            if suspect is not None and suspect.exists():
-                try:
-                    log.warning(f"{self.symbol}: deleting suspect cache file: {suspect}")
-                    suspect.unlink()
-                except OSError:
-                    log.error(f"{self.symbol}: rm failed: suspect cache file: {suspect}")
+            for suspect in (self._staged(hour), self.ctx.kept_raw(_bi5_relpath(hour))):
+                if suspect is not None and suspect.exists():
+                    try:
+                        log.warning(f"{self.symbol}: deleting suspect cache file: {suspect}")
+                        suspect.unlink()
+                    except OSError:
+                        log.error(f"{self.symbol}: rm failed: suspect cache file: {suspect}")
 
             raw2 = _download_bi5(
                 url,
@@ -821,6 +833,7 @@ def export_range(
     progress: Progress | None = None,
     timeout: tuple[float, float] = (DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT),
     retries: int = DEFAULT_RETRIES,
+    keep_raw: bool = False,
 ) -> tuple[Path | None, Path | None]:
     """Export one symbol from Dukascopy: :func:`tradedesk_marketdata.export.export_range`
     with a :class:`DukascopySource`, or the probe when ``probe`` is set.
@@ -851,4 +864,5 @@ def export_range(
         progress=progress,
         timeout=timeout,
         retries=retries,
+        keep_raw=keep_raw,
     )

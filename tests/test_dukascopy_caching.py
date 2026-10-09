@@ -12,6 +12,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 import tradedesk_marketdata.export as ex
 import tradedesk_marketdata.sources.dukascopy as dk
@@ -400,6 +401,62 @@ def test_no_resample_returns_none_tuple_and_writes_no_csv(monkeypatch, tmp_path)
 
     assert result == (None, None)
     assert not out_dir.exists() or not any(out_dir.iterdir())
+
+
+def test_keep_raw_moves_a_committed_days_bi5_under_raw(monkeypatch, tmp_path):
+    cache_dir = tmp_path / "cache"
+    start = datetime(2025, 3, 1, 0, 0, tzinfo=UTC)
+    hours = [start, start + timedelta(hours=1)]
+    monkeypatch.setattr(dk, "_iter_hours", lambda *_: iter(hours))
+    monkeypatch.setattr(dk, "DOWNLOAD_THREADS_PER_INSTRUMENT", 1)
+    _patch_download_and_decode(monkeypatch)
+
+    dk.export_range(
+        symbol="EURUSD",
+        start_utc=start,
+        end_utc_inclusive=start,
+        out=tmp_path / "out",
+        resample_rule=None,
+        cache_dir=cache_dir,
+        keep_raw=True,
+    )
+
+    assert ex._day_is_committed(cache_dir, "EURUSD", start.date())
+    assert not (cache_dir / "EURUSD" / "2025" / "02" / "01").exists()  # staging day dir gone
+    kept = cache_dir / "EURUSD" / "_raw" / "dukascopy" / "2025" / "02" / "01"
+    assert sorted(p.name for p in kept.iterdir()) == ["00h_ticks.bi5", "01h_ticks.bi5"]
+
+
+def test_a_kept_hour_is_read_instead_of_fetched(monkeypatch, tmp_path):
+    cache_dir = tmp_path / "cache"
+    start = datetime(2025, 3, 1, 0, 0, tzinfo=UTC)
+    kept = cache_dir / "EURUSD" / "_raw" / "dukascopy" / "2025" / "02" / "01" / "00h_ticks.bi5"
+    kept.parent.mkdir(parents=True)
+    kept.write_bytes(b"kept")
+    monkeypatch.setattr(dk, "_iter_hours", lambda *_: iter([start]))
+    monkeypatch.setattr(dk, "DOWNLOAD_THREADS_PER_INSTRUMENT", 1)
+    _patch_download_and_decode(monkeypatch)
+    monkeypatch.setattr(dk, "_download_bi5", lambda *_, **__: pytest.fail("must not fetch"))
+    seen: list[bytes] = []
+
+    def fake_decode(hour_start, comp, *, price_format, price_divisor):
+        seen.append(comp)
+        return [_make_tick(hour_start)]
+
+    monkeypatch.setattr(dk, "_decode_ticks", fake_decode)
+
+    dk.export_range(
+        symbol="EURUSD",
+        start_utc=start,
+        end_utc_inclusive=start,
+        out=tmp_path / "out",
+        resample_rule=None,
+        cache_dir=cache_dir,
+    )
+
+    assert seen == [b"kept"]
+    assert ex._day_is_committed(cache_dir, "EURUSD", start.date())
+    assert kept.read_bytes() == b"kept"  # a kept unit is never deleted
 
 
 # ---------------------------------------------------------------------------

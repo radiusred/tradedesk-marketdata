@@ -406,6 +406,7 @@ def export_range(
     progress: "Progress | None" = None,
     timeout: tuple[float, float] = (DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT),
     retries: int = DEFAULT_RETRIES,
+    keep_raw: bool = False,
 ) -> tuple[Path | None, Path | None]:
     """Export the UTC days of [start_utc, end_utc_inclusive] of one symbol from ``source``.
 
@@ -423,6 +424,8 @@ def export_range(
     - every committed day is recorded in ``_sources.jsonl`` with the source's
       name, scale factor and unit(s), and a partial day in
       ``_partial_days.jsonl``
+    - with ``keep_raw`` the source retains its fetched units under
+      ``{cache}/{SYMBOL}/_raw/{source}/`` after commit instead of deleting them
 
     With progress, four tasks per symbol: ``dl`` (units fetched), ``rs``
     (units processed) and ``write`` (range CSVs) when resampling, and
@@ -443,6 +446,7 @@ def export_range(
         commit_partial_after_days=commit_partial_after_days,
         timeout=timeout,
         retries=retries,
+        keep_raw=keep_raw,
     )
 
     days: list[date] = []

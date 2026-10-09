@@ -513,19 +513,22 @@ class _HistDataRun(SourceRun):
         return _UNAVAILABLE if data is None else _Zip(data)
 
     def fetch(self, unit: _Month) -> _Zip | _Failed | str:
-        """A month's zip from the staged copy when it is final, else from HistData."""
+        """A month's zip from the staged or kept copy when it is final, else from HistData."""
         ym = unit.ym
         if ym < self.inst.first_month:
             return _BEFORE_FIRST
         staged = self._staged(ym)
-        if staged is not None and staged.exists():
-            mtime = datetime.fromtimestamp(staged.stat().st_mtime, UTC)
-            if self.is_settled(ym) and mtime >= self.settled_at(ym):
-                return _Zip(staged.read_bytes(), cached=staged)
-            log.info(
-                f"{self.symbol}: cached {staged} predates its month settling; fetching it again"
-            )
-            staged.unlink(missing_ok=True)
+        if staged is not None:
+            cached = staged if staged.exists() else self.ctx.kept_raw(_zip_relpath(ym))
+            if cached is not None:
+                mtime = datetime.fromtimestamp(cached.stat().st_mtime, UTC)
+                if self.is_settled(ym) and mtime >= self.settled_at(ym):
+                    return _Zip(cached.read_bytes(), cached=cached)
+                log.info(
+                    f"{self.symbol}: cached {cached} predates its month settling; fetching it again"
+                )
+                if cached == staged:  # a kept unit stays where --keep-raw put it
+                    cached.unlink(missing_ok=True)
         return self._download(ym)
 
     def _fail(self, ym: YearMonth) -> None:
@@ -645,7 +648,7 @@ class _HistDataRun(SourceRun):
         )
 
     def finish(self) -> None:
-        # Drop month zips whose days are all committed; keep the rest for the next run.
+        # Retire month zips whose days are all committed; keep the rest for the next run.
         cache_dir = self.ctx.cache_dir
         if cache_dir is not None:
             for ym, st in self.status.items():
@@ -718,6 +721,7 @@ def export_range_histdata(
     progress: Progress | None = None,
     timeout: tuple[float, float] = (DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT),
     retries: int = DEFAULT_RETRIES,
+    keep_raw: bool = False,
 ) -> tuple[Path | None, Path | None]:
     """Export the UTC days of [start_utc, end_utc_inclusive] from HistData.
 
@@ -758,6 +762,7 @@ def export_range_histdata(
         progress=progress,
         timeout=timeout,
         retries=retries,
+        keep_raw=keep_raw,
     )
 
 
