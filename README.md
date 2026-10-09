@@ -10,10 +10,11 @@
 
 This tool downloads raw tick data, converts it into clean, deterministic CSV
 candle files, and writes a metadata sidecar describing exactly how the data was
-produced. Two tick sources are supported, Dukascopy's public datafeed (the
-default) and HistData.com's monthly tick files (`--source histdata`); both
-write the same cache, so the candle files look the same whichever source
-produced a day (see [Sources](#sources)).
+produced. Two tick sources are supported, Dukascopy's public datafeed
+(`--source dukascopy`) and HistData.com's monthly tick files
+(`--source histdata`); `--source` is required. Both write the same cache, so
+the candle files look the same whichever source produced a day (see
+[Sources](#sources)).
 
 It is designed to be run once per dataset, not repeatedly during backtests.
 
@@ -36,7 +37,7 @@ pip install tradedesk-marketdata
 Export 5-minute candles for EURUSD:
 
 ```bash
-tradedesk-md-export --symbols EURUSD \
+tradedesk-md-export --source dukascopy --symbols EURUSD \
   --from 2025-01-01 --to 2025-01-31 \
   --resample 5min \
   --out data \
@@ -62,13 +63,16 @@ on which price side you want to replay.
 
 ## Sources
 
-`--source` picks where the ticks come from. Both sources feed the same
+`--source` picks where the ticks come from. It is required: there is no
+default, and leaving it out is a usage error that lists the available sources.
+A source's own options (`--price-divisor`, `--probe` and `--probe-ticks` are
+Dukascopy's) are refused with any other source. Both sources feed the same
 pipeline from the tick onwards, so they write identical day files
 (`{cache}/{SYMBOL}/{YYYY}/{MM0}/{DD}_bid.csv.zst` and `_ask.csv.zst`, the same
 columns, UTC timestamps, zstd level and atomic commit) under the cache's symbol
 names, and the same range CSVs and sidecars.
 
-| | Dukascopy (`--source dukascopy`, default) | HistData.com (`--source histdata`) |
+| | Dukascopy (`--source dukascopy`) | HistData.com (`--source histdata`) |
 |---|---|---|
 | Unit fetched | one `.bi5` file per instrument-hour | one zip per instrument-month |
 | Coverage | varies per instrument | FX majors from 2000, GBPJPY 2002, XAUUSD 2009, the indices from 2010-11 (see the table below) |
@@ -98,7 +102,7 @@ tradedesk-md-export --source histdata --symbols USA500IDXUSD \
   --cache-dir ./cache --workers 1
 ```
 
-Symbol table (`tradedesk_marketdata.histdata.HISTDATA_SYMBOLS`). The cache
+Symbol table (`tradedesk_marketdata.sources.histdata.HISTDATA_SYMBOLS`). The cache
 stores Dukascopy's raw units, which downstream `raw_scale` settings depend on,
 so HistData's decimal prices are multiplied by the symbol's scale on decode
 (EURUSD `1.10366` is stored as `11036.6`, GBPJPY `179.601` as `17960.1`,
@@ -207,7 +211,7 @@ Examples:
 If unsure, use probe mode:
 
 ```bash
-tradedesk-md-export --symbols GBPSEK \
+tradedesk-md-export --source dukascopy --symbols GBPSEK \
   --from 2025-07-01 --to 2025-07-01 \
   --probe
 ```
@@ -412,6 +416,18 @@ early-exit check, in three cases:
 
 In every case there is no leftover state to confuse downstream consumers.
 
+### Keeping the raw units (`--keep-raw`)
+
+By default a source deletes its fetched raw units (Dukascopy's hourly `.bi5`,
+HistData's month zips) once every day they feed is committed. With
+`--keep-raw` they are moved instead to `{cache}/{SYMBOL}/_raw/{source}/`
+(`_raw/dukascopy/{YYYY}/{MM0}/{DD}/{HH}h_ticks.bi5`, `_raw/histdata/{YYYY}{MM}.zip`),
+and both sources read a unit from there before making any request for it. When a
+source's decode is fixed, delete the affected day files and re-run the export:
+the days are rebuilt from the kept units, without downloading years of history
+again. The tool deletes nothing under `_raw/`, except a kept unit that no
+longer decodes, which is fetched again.
+
 For this to work well though, you should treat the cache directory as a permanent, not a transient store of local market data that can be added to over time. Best practice is to **always** specify a `--cache-dir` that points to your common market data trove wherever you use the tool from.
 
 ### Concurrency and Dukascopy reliability
@@ -446,7 +462,7 @@ quick. Rate limiting (HTTP 429) is per client address: more concurrency makes
 it worse, longer timeouts do not.
 
 ```bash
-tradedesk-md-export --symbols USA500IDXUSD \
+tradedesk-md-export --source dukascopy --symbols USA500IDXUSD \
   --from 2010-01-01 --to 2019-12-31 \
   --cache-dir /opt/tradedesk/marketdata --price-divisor 1 \
   --workers 1 --connect-timeout 15 --read-timeout 90 --retries 5
@@ -473,7 +489,7 @@ them in. Only a genuine 404 or an undecodable payload counts towards a
 partial commit.
 
 ```bash
-tradedesk-md-export --symbols LIGHTCMDUSD \
+tradedesk-md-export --source dukascopy --symbols LIGHTCMDUSD \
   --from 2022-01-01 --to 2022-12-31 \
   --out data --cache-dir ./cache \
   --price-divisor 1000 --workers 1 \
@@ -499,7 +515,7 @@ the standard library's `CRITICAL` and `DEBUG` levels, so `trace` behaves
 identically to `debug` rather than erroring out.
 
 ```bash
-tradedesk-md-export --symbols EURUSD \
+tradedesk-md-export --source dukascopy --symbols EURUSD \
   --from 2025-01-01 --to 2025-01-31 \
   --out data --cache-dir ./cache --workers 1 \
   --log-level debug

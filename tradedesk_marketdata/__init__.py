@@ -1,7 +1,8 @@
 """
 tradedesk_marketdata: market data download + export utilities for backtesting.
 
-Sources: Dukascopy (default) and HistData.com; both write the same candle cache.
+Sources are registered by name in ``tradedesk_marketdata.sources``; every source
+writes the same candle cache.
 
 Copyright 2026 Radius Red Ltd.
 """

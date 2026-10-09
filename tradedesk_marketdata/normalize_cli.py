@@ -19,7 +19,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="tradedesk-md-normalize",
         description=(
-            "Detect and correct price-scale errors in a Dukascopy candle cache.\n\n"
+            "Detect and correct price-scale errors in a candle cache.\n\n"
             "Use --dry-run first to preview what would be changed."
         ),
     )
