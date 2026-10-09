@@ -45,6 +45,7 @@ tooling = ["llm-tldr[dev]>=1.5.2"]
 tradedesk-md-export = "tradedesk_marketdata.cli:main"
 tradedesk-md-normalize = "tradedesk_marketdata.normalize_cli:main"
 tradedesk-md-rescale = "tradedesk_marketdata.rescale_cli:main"
+tradedesk-md-verify = "tradedesk_marketdata.verify_cli:main"
 # The pre-2.0 command names, kept as aliases for one major version.
 tradedesk-dc-export = "tradedesk_marketdata.cli:main"
 tradedesk-dc-normalize = "tradedesk_marketdata.normalize_cli:main"
