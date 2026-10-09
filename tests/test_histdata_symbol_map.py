@@ -45,7 +45,7 @@ def test_the_shipped_map_holds_the_25_instruments() -> None:
     assert shipped == hd.HISTDATA_SYMBOLS
     assert len(shipped) == 25
     assert shipped["USA500IDXUSD"] == hd.HistDataInstrument(
-        "SPXUSD", 1.0, (2010, 11), True, "Dukascopy median close ~4782"
+        "SPXUSD", 1.0, (2010, 11), True, "Dukascopy 2024-01-10: raw 4786.2"
     )
     assert (shipped["EURUSD"].scale, shipped["EURUSD"].first_month) == (1e4, (2000, 5))
     assert (shipped["USDJPY"].scale, shipped["XAUUSD"].scale) == (1e2, 1e2)
@@ -60,16 +60,44 @@ def test_the_shipped_map_holds_the_25_instruments() -> None:
     )
 
 
+# The verifying Dukascopy figures (ask close in cache raw units, 2024-01-10),
+# as the coordinator computed them on #95 from a Dukascopy cache.
+FIGURES_2024_01_10 = {
+    "AUDCAD": "8968",
+    "AUDJPY": "9767.2",
+    "AUDNZD": "10761",
+    "AUDUSD": "6702.6",
+    "AUSIDXAUD": "7494.43",
+    "CHFJPY": "17134.1",
+    "DEUIDXEUR": "16734.2",
+    "EURCAD": "14683.6",
+    "EURCHF": "9335.1",
+    "EURGBP": "8611.3",
+    "EURUSD": "10974.3",
+    "GBPAUD": "19018.4",
+    "GBPCHF": "10841.4",
+    "GBPJPY": "18574.1",
+    "GBPUSD": "12745.4",
+    "GBRIDXGBP": "7660.91",
+    "JPNIDXJPY": "34928.6",
+    "NZDCAD": "8334.8",
+    "USA500IDXUSD": "4786.2",
+    "USDCAD": "13380.8",
+    "USDCHF": "8506.1",
+    "USDJPY": "14573.2",
+    "XAUUSD": "202698",
+}
+
+
 def test_every_shipped_entry_carries_its_figure_or_is_unverified() -> None:
     verified = {s: i.scale_evidence for s, i in hd.HISTDATA_SYMBOLS.items() if i.scale_verified}
     assert verified == {
-        "USA500IDXUSD": "Dukascopy median close ~4782",
+        **{s: f"Dukascopy 2024-01-10: raw {f}" for s, f in FIGURES_2024_01_10.items()},
         "BRENTCMDUSD": "Dukascopy 2022-02-21: raw 9712.8 for 97.128",
-        "XAUUSD": "Dukascopy median close ~151948",
-        "EURUSD": "Dukascopy median close ~11217",
-        "USDJPY": "Dukascopy median close ~12029",
     }
-    assert all(not i.scale_evidence for i in hd.HISTDATA_SYMBOLS.values() if not i.scale_verified)
+    unverified = {s for s, i in hd.HISTDATA_SYMBOLS.items() if not i.scale_verified}
+    assert unverified == {"EURSEK"}  # no Dukascopy day to compare with
+    assert not hd.HISTDATA_SYMBOLS["EURSEK"].scale_evidence
 
 
 def test_brent_is_scaled_into_dukascopy_cents() -> None:
