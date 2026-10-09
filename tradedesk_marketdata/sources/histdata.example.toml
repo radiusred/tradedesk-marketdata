@@ -32,6 +32,16 @@
 # Not on HistData, so not mapped: EURSGD, GBPEUR, BTCUSD.
 
 
+# Settings for every instrument.
+[histdata]
+# The month-join level check refuses a month whose first trading day's close is
+# more than (1 + max_month_join_step) times, or less than 1 / (1 + it) times,
+# the last accepted close before it (the previous month's, or the nearest day
+# already in the cache), names it, and leaves its days uncommitted. It catches a
+# series that switches to another instrument at a month join; an overnight move
+# of 70% is not an overnight move. Days in an exclusion span are left out.
+max_month_join_step = 0.7
+
 # --- Indices and commodities: HistData uses its own codes -------------------
 
 [symbols.USA500IDXUSD]
