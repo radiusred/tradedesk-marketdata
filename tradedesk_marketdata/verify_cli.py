@@ -5,9 +5,7 @@ Usage::
     tradedesk-md-verify --reference ./trusted-cache --cache-dir ./new-cache \\
         --symbols EURUSD USA500IDXUSD --from 2020-01-01 --to 2020-12-31
 
-Exit status: 0 when the cache matches the reference; 1 when any day is
-shifted, differs beyond ``--tolerance`` at the daily level, or sits in a
-close-ratio regime other than 1.0; 2 on a usage error; 130 on Ctrl-C.
+Exit status: see ``EXIT_STATUS``.
 """
 
 from __future__ import annotations
@@ -31,9 +29,20 @@ def _day(text: str) -> date:
         raise argparse.ArgumentTypeError(f"not a YYYY-MM-DD date: {text!r}") from None
 
 
+EXIT_STATUS = """exit status:
+  0    the cache matches the reference over the days compared
+  1    a finding: a day shifted by whole minutes, a day differing beyond --tolerance,
+       a close-ratio regime other than 1.0, an unreadable day file, or a symbol with
+       no day that has data on both sides (nothing was compared)
+  2    a usage error
+  130  interrupted (Ctrl-C)"""
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="tradedesk-md-verify",
+        epilog=EXIT_STATUS,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "Compare the day files of a cache with a reference cache of the same symbols, "
             "day by day: whole-minute timestamp shifts, daily-bar differences and "

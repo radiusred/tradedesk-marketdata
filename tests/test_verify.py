@@ -98,7 +98,7 @@ def test_an_identical_pair_has_no_findings(tmp_path, reference, capsys):
     rc, out = _run(tmp_path, capsys=capsys)
 
     assert rc == 0
-    assert "No findings: the cache matches the reference." in out
+    assert "No findings: the cache matches the reference over 153 compared day(s)." in out
     [report] = v.verify(tmp_path / "ref", tmp_path / "cache", [SYMBOL], FIRST, LAST)
     statuses = {d.status for d in report.days}
     assert statuses == {"same", "empty"}
@@ -292,3 +292,72 @@ def test_the_command_is_installed() -> None:
         "scripts"
     ]
     assert scripts["tradedesk-md-verify"] == "tradedesk_marketdata.verify_cli:main"
+
+
+def test_no_overlap_is_a_finding_not_a_green(tmp_path, reference, capsys):
+    # The cache holds another symbol: nothing of EURUSD is on both sides.
+    other = tmp_path / "cache" / "GBPUSD" / "2024" / "00"
+    other.mkdir(parents=True)
+
+    rc, out = _run(tmp_path, capsys=capsys)
+
+    assert rc == 1
+    assert "No findings" not in out
+    assert "Days compared (data on both sides): 0 (EURUSD 0)" in out
+    assert _findings(out) == [
+        "EURUSD: no day in the range has data on both sides (153 day(s) only in the reference, "
+        "0 only in the cache), so nothing was compared; check --symbols, --reference, "
+        "--cache-dir and the dates"
+    ]
+    rc, out = _run(tmp_path, "--format", "json", capsys=capsys)
+    doc = json.loads(out)
+    assert rc == 1 and doc["compared"] == 0 and doc["symbols"][0]["compared"] == 0
+    assert [f["kind"] for f in doc["findings"]] == ["no-overlap"]
+
+
+def test_the_success_line_counts_the_compared_days(tmp_path, reference, capsys):
+    _write(tmp_path / "cache", reference, FIRST, LAST)
+
+    rc, out = _run(tmp_path, capsys=capsys)
+
+    assert rc == 0
+    assert "Days compared (data on both sides): 153 (EURUSD 153)" in out
+    assert "No findings: the cache matches the reference over 153 compared day(s)." in out
+
+
+def test_an_unreadable_day_file_is_reported_not_one_sided(tmp_path, reference, capsys, caplog):
+    _write(tmp_path / "cache", reference, FIRST, LAST)
+    bad = ex._daily_candle_path(tmp_path / "cache", SYMBOL, date(2024, 3, 6), "bid")
+    bad.write_bytes(bad.read_bytes()[:20])  # a truncated .zst
+
+    with caplog.at_level("WARNING"):
+        rc, out = _run(tmp_path, capsys=capsys)
+
+    assert rc == 1
+    assert f"unreadable day file {bad}" in caplog.text
+    assert _findings(out) == [
+        f"EURUSD 2024-03-06: the cache {bad} day file does not decode; the day was not compared"
+    ]
+    [report] = v.verify(tmp_path / "ref", tmp_path / "cache", [SYMBOL], FIRST, LAST)
+    assert report.years[2024]["counts"]["unreadable"] == 1
+    assert report.years[2024]["counts"]["only-left"] == 0
+
+
+def test_an_interrupt_exits_130(tmp_path, reference, monkeypatch, capsys):
+    _write(tmp_path / "cache", reference, FIRST, FIRST)
+
+    def interrupted(*_, **__):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(v, "verify", interrupted)
+    rc, _ = _run(tmp_path, capsys=capsys)
+    assert rc == 130
+
+
+def test_help_lists_the_exit_statuses(capsys):
+    with pytest.raises(SystemExit):
+        verify_cli.build_parser().parse_args(["--help"])
+    out = capsys.readouterr().out
+    for status in ("0 ", "1 ", "2 ", "130"):
+        assert f"\n  {status}" in out
+    assert "no day that has data on both sides" in out

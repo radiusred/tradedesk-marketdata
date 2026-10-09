@@ -493,7 +493,9 @@ tradedesk-md-verify --reference ./cache-trusted --cache-dir ./cache-new \
 For every day that has a file on either side it reports:
 
 - **Status:** one of `same`, `shifted`, `different`, `only-left`
-  (reference only), `only-right` (cache only) or `empty`.
+  (reference only), `only-right` (cache only), `empty` or `unreadable`. An
+  `unreadable` day file is a file that does not decode. It is logged and
+  reported as a finding, never mistaken for a missing day.
 - **Minute-level identity:** for every whole-minute shift in ±180 min (30-min
   steps), the fraction of the reference's minutes whose open, high, low and
   close are identical in the cache at that shift. Volume is excluded unless
@@ -519,8 +521,11 @@ BRENTCMDUSD 2010-11-01..2024-12-31: reference/cache close ratio 100 over 4340 da
 ```
 
 The exit status is:
-- `1` when any day is shifted, any day differs beyond the tolerance, or any
-  regime is other than 1.0;
+- `1` when any day is shifted, any day differs beyond the tolerance, any
+  regime is other than 1.0, any day file is unreadable, or a symbol has no
+  day with data on both sides (`no-overlap`: a mistyped symbol or cache
+  directory must not pass as a clean result). The output always states how
+  many days were compared, per symbol and in total;
 - `0` otherwise. Days present on one side only are counted, but do not fail
   the check;
 - `2` for a usage error;
