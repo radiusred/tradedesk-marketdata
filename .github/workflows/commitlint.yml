@@ -1,0 +1,48 @@
+name: Lint commit messages
+# Every pull request in this repository reports this check, docs-only ones included:
+# no path filter, no branch guard, no `[skip ci]` bypass. `gh codecrew task
+# finish` refuses NO_CHECKS on a PR that reports none (SPEC §8), and the job
+# name is the check context the org's require-lint ruleset pins.
+#
+# Copied from radiusred/trading-hub's commitlint.yml, which takes the RAD-nnn
+# step verbatim from radiusred/tradedesk's `lint-commits` job and adds the org's
+# shared commitlint action.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  lint-commits:
+    name: Lint commit messages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Forbid internal ticket references (RAD-nnn)
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            msgs=$(git log --format='%s%n%b' "origin/${{ github.base_ref }}..HEAD")
+          else
+            before="${{ github.event.before }}"
+            after="${{ github.sha }}"
+            if [ "$before" = "0000000000000000000000000000000000000000" ]; then
+              msgs=$(git log --format='%s%n%b' -1 "$after")
+            else
+              msgs=$(git log --format='%s%n%b' "${before}..${after}")
+            fi
+          fi
+          bad=$(printf '%s' "$msgs" | grep -E 'RAD-[0-9]+' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::Commit message(s) contain internal ticket reference(s):"
+            printf '%s\n' "$bad"
+            exit 1
+          fi
+          echo "OK – no internal ticket references found."
+
+      - name: Lint against the Radius Red commitlint config
+        uses: radiusred/.github/.github/actions/commitlint@main
