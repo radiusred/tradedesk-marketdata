@@ -218,7 +218,7 @@ def test_failed_month_leaves_its_days_uncommitted_and_is_reported(monkeypatch, t
 def test_month_histdata_lacks_is_retried_until_settled_then_partial_committed(
     monkeypatch, tmp_path
 ):
-    # Mon 2015-06-01 00:00-05:00 UTC is in May's file, which HistData lacks here;
+    # Mon 2015-06-01 00:00-04:00 UTC (US DST) is in May's file, which HistData lacks here;
     # the rest of the day is in June's.
     zips = {
         (2015, 6): month_zip(
@@ -235,7 +235,7 @@ def test_month_histdata_lacks_is_retried_until_settled_then_partial_committed(
     assert _committed(cache, date(2015, 6, 1))
     [partial] = _jsonl(ex._partial_day_manifest_path(cache, SYMBOL))
     assert partial["day"] == "2015-06-01"
-    assert partial["missing_hours"] == [0, 1, 2, 3, 4]
+    assert partial["missing_hours"] == [0, 1, 2, 3]
     assert partial["gap_reason"] == "histdata_month_unavailable"
 
 

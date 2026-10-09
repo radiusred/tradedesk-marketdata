@@ -28,14 +28,105 @@ def _clear_cancellation():
 # ---------------------------------------------------------------------------
 
 
-def test_decode_converts_fixed_est_to_utc_all_year_round():
-    # EST without daylight saving is UTC-5 in winter *and* in summer.
-    csv = b"20150101 180000497,2055.000000,2055.250000,0\n20150701 120000000,2.0,2.5,0\n"
-    ticks = hd.decode_ticks(csv, scale=1.0)
-    assert list(ticks.index) == [
-        pd.Timestamp("2015-01-01 23:00:00.497", tz="UTC"),
-        pd.Timestamp("2015-07-01 17:00:00", tz="UTC"),
-    ]
+# ---------------------------------------------------------------------------
+# Timestamps: one rule per provider era (not HistData's "fixed UTC-5")
+# ---------------------------------------------------------------------------
+
+
+def _utc_of(stamp: str) -> pd.Timestamp:
+    """Decode one tick stamped ``stamp`` (``YYYYMMDD HHMMSSNNN``) and return its UTC time."""
+    ticks = hd.decode_ticks(f"{stamp},1.0,1.5,0\n".encode(), scale=1.0)
+    return ticks.index[0]
+
+
+@pytest.mark.parametrize(
+    ("stamp", "utc"),
+    [
+        # First era, New York local time: UTC-5 in winter, UTC-4 under US DST.
+        ("20150101 180000497", "2015-01-01 23:00:00.497"),
+        ("20150701 120000000", "2015-07-01 16:00:00"),
+        # US DST starts Sun 2015-03-08 02:00 local: a stamp either side of it.
+        ("20150308 015959000", "2015-03-08 06:59:59"),
+        ("20150308 030000000", "2015-03-08 07:00:00"),
+        # US-only DST weeks of March: already UTC-4 (EU clocks have not moved).
+        ("20150311 120000000", "2015-03-11 16:00:00"),
+        # US DST ends Sun 2015-11-01 02:00 local (01:00-02:00 happens twice).
+        ("20151031 120000000", "2015-10-31 16:00:00"),
+        ("20151101 030000000", "2015-11-01 08:00:00"),
+        # Second era, Zurich local time minus six hours: UTC-5 in winter, UTC-4
+        # under EU DST.
+        ("20190115 120000000", "2019-01-15 17:00:00"),
+        ("20190715 120000000", "2019-07-15 16:00:00"),
+        # US-only DST weeks of March: still UTC-5 (Zurich is on winter time).
+        ("20190311 120000000", "2019-03-11 17:00:00"),
+        ("20190327 120000000", "2019-03-27 17:00:00"),
+        # EU DST starts Sun 2019-03-31 02:00 Zurich = Sat 20:00 stamp.
+        ("20190330 195959000", "2019-03-31 00:59:59"),
+        ("20190330 210000000", "2019-03-31 01:00:00"),
+        ("20190402 120000000", "2019-04-02 16:00:00"),
+        # EU DST ends Sun 2019-10-27 03:00 Zurich = Sat 21:00 stamp; the US
+        # is still on DST until 2019-11-03, HistData is already back on UTC-5.
+        ("20191026 120000000", "2019-10-26 16:00:00"),
+        ("20191029 120000000", "2019-10-29 17:00:00"),
+    ],
+)
+def test_stamps_decode_per_provider_era(stamp, utc):
+    assert _utc_of(stamp) == pd.Timestamp(utc, tz="UTC")
+
+
+def test_the_era_switch_is_2018_12_16():
+    assert hd.ERA_SWITCH == datetime(2018, 12, 16)
+    # Both rules give UTC-5 in December, so the switch moves no tick.
+    assert _utc_of("20181214 165959847") == pd.Timestamp("2018-12-14 21:59:59.847", tz="UTC")
+    assert _utc_of("20181216 180007859") == pd.Timestamp("2018-12-16 23:00:07.859", tz="UTC")
+
+
+@pytest.mark.parametrize(
+    ("sunday", "first_stamp"),
+    [
+        (date(2015, 7, 12), "20150712 170000000"),  # first era
+        (date(2021, 7, 11), "20210711 170000000"),  # second era
+    ],
+)
+def test_a_summer_sunday_open_lands_at_21_utc(sunday, first_stamp):
+    # The FX week opens at 17:00 New York; in summer that is 21:00 UTC, not 22:00.
+    assert _utc_of(first_stamp) == pd.Timestamp(
+        datetime(sunday.year, sunday.month, sunday.day, 21), tz="UTC"
+    )
+
+
+@pytest.mark.parametrize(
+    "utc",
+    [
+        datetime(2015, 3, 8, 6, 59, tzinfo=UTC),
+        datetime(2015, 7, 1, 16, tzinfo=UTC),
+        datetime(2015, 11, 1, 5, 30, tzinfo=UTC),  # the first 01:30 of the repeated hour
+        datetime(2018, 12, 16, 23, tzinfo=UTC),
+        datetime(2019, 3, 31, 1, tzinfo=UTC),
+        datetime(2019, 10, 27, 3, tzinfo=UTC),
+    ],
+)
+def test_stamp_conversion_round_trips(utc):
+    assert hd._est_to_utc(hd._utc_to_est(utc)) == utc
+
+
+def test_a_repeated_local_hour_reads_as_its_first_occurrence():
+    # 01:30 on 2015-11-01 happens twice in New York; the first is EDT (UTC-4). A UTC
+    # time inside the second occurrence therefore does not round-trip.
+    assert _utc_of("20151101 013000000") == pd.Timestamp("2015-11-01 05:30:00", tz="UTC")
+
+
+def test_a_skipped_local_hour_moves_forward_an_hour():
+    # 02:30 on 2015-03-08 does not exist in New York; read as 03:30 EDT.
+    assert _utc_of("20150308 023000000") == pd.Timestamp("2015-03-08 07:30:00", tz="UTC")
+
+
+def test_month_spans_follow_daylight_saving():
+    # A summer month file starts at 04:00 UTC, a winter one at 05:00 UTC.
+    assert hd._month_span((2015, 7))[0] == datetime(2015, 7, 1, 4, tzinfo=UTC)
+    assert hd._month_span((2015, 1))[0] == datetime(2015, 1, 1, 5, tzinfo=UTC)
+    assert hd._month_span((2019, 4))[0] == datetime(2019, 4, 1, 4, tzinfo=UTC)
+    assert hd._months_for_day(date(2015, 7, 1)) == [(2015, 6), (2015, 7)]
 
 
 def test_decode_reads_bid_then_ask_and_zero_volume():

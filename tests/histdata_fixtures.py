@@ -10,8 +10,8 @@ from tradedesk_marketdata.sources import histdata as hd
 
 
 def est_line(ts_utc: datetime, bid: str, ask: str) -> str:
-    """One HistData tick line: EST (UTC-5, no DST) timestamp, decimal bid/ask, volume 0."""
-    est = ts_utc.astimezone(UTC) - timedelta(hours=5)
+    """One HistData tick line for a UTC time: its HistData stamp, decimal bid/ask, volume 0."""
+    est = hd._utc_to_est(ts_utc.astimezone(UTC))
     stamp = est.strftime("%Y%m%d %H%M%S") + f"{est.microsecond // 1000:03d}"
     return f"{stamp},{bid},{ask},0"
 
