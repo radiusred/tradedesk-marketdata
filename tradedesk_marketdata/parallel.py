@@ -4,7 +4,7 @@ import logging
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -18,6 +18,7 @@ from rich.progress import (
 )
 
 from . import export
+from .bad_ticks import BadTickRule
 from .cancel import cancellation as _cancellation_event
 from .source import Source
 
@@ -39,6 +40,8 @@ class ExportTask:
     timeout: tuple[float, float] | None = None
     retries: int | None = None
     keep_raw: bool = False
+    bad_tick_rule: BadTickRule | None = field(default_factory=BadTickRule)
+    reexport: bool = False
 
 
 @dataclass
@@ -73,6 +76,8 @@ def _export_worker(task: ExportTask, progress: Progress | None = None) -> Export
             out=task.out,
             progress=progress,
             keep_raw=task.keep_raw,
+            bad_tick_rule=task.bad_tick_rule,
+            reexport=task.reexport,
             **network,  # type: ignore[arg-type]
         )
         output_csvs = [p for p in (bid_csv, ask_csv) if p is not None]

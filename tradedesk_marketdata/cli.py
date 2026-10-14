@@ -11,6 +11,7 @@ from typing import NoReturn
 from rich.logging import RichHandler
 
 from . import sources
+from .bad_ticks import DEFAULT_MAX_JUMP, DEFAULT_WINDOW, BadTickRule
 from .metadata import ExportMetadata, now_iso_utc, write_sidecar
 from .source import (
     DEFAULT_CONNECT_TIMEOUT,
@@ -128,6 +129,32 @@ def build_parser() -> argparse.ArgumentParser:
         "{cache}/{SYMBOL}/_raw/{source}/, so a later decode fix can be applied by re-decoding "
         "locally instead of fetching again; a kept unit is read from there before any request. "
         "Default: delete raw units once their days are committed",
+    )
+    p.add_argument(
+        "--bad-tick-max-jump",
+        type=float,
+        default=DEFAULT_MAX_JUMP,
+        metavar="FRACTION",
+        help="Bad-tick rule: a one-side price is dropped when it differs by more than this "
+        "fraction from its own tick's other side and from the median of its neighbouring "
+        "ticks on both sides; each dropped price is listed under dropped_ticks in the day's "
+        f"_sources.jsonl record (default: {DEFAULT_MAX_JUMP:g})",
+    )
+    p.add_argument(
+        "--bad-tick-window",
+        type=int,
+        default=DEFAULT_WINDOW,
+        metavar="TICKS",
+        help="Bad-tick rule: how many neighbouring ticks before and after a tick give its "
+        f"reference medians (default: {DEFAULT_WINDOW})",
+    )
+    p.add_argument(
+        "--reexport",
+        action="store_true",
+        help="Build one already-committed day again from the source and replace its two day "
+        "files (one symbol, --from equal to --to, a cache dir); a new _sources.jsonl record "
+        "with reexport: true is appended. When the source does not commit the day again, the "
+        "files stay as they were and the export exits 1",
     )
     p.add_argument(
         "--workers",
@@ -264,6 +291,15 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--connect-timeout and --read-timeout must be > 0")
     if args.retries < 1:
         raise SystemExit("--retries must be >= 1")
+    try:
+        bad_tick_rule = BadTickRule(max_jump=args.bad_tick_max_jump, window=args.bad_tick_window)
+    except ValueError as e:
+        parser.error(f"bad-tick rule: {e}")
+    if args.reexport:
+        if len(args.symbols) != 1 or end_utc != start_utc:
+            parser.error("--reexport takes exactly one symbol and one day (--from equal to --to)")
+        if args.no_cache:
+            parser.error("--reexport needs the cache: it replaces a committed day's files")
     timeout = (args.connect_timeout, args.read_timeout)
 
     configure_logging(level=args.log_level)
@@ -313,6 +349,8 @@ def main(argv: list[str] | None = None) -> int:
             timeout=timeout,
             retries=args.retries,
             keep_raw=args.keep_raw,
+            bad_tick_rule=bad_tick_rule,
+            reexport=args.reexport,
         )
         for symbol in args.symbols
     ]
