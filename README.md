@@ -94,8 +94,11 @@ therefore stored identically:
   `timestamp,open,high,low,close,volume`, is compressed with zstd level 3,
   and is written atomically.
 - **First committed wins.** A day that already has both candle files is never
-  fetched or rewritten, by any source. To replace a day, delete its two files
-  and re-export it.
+  fetched or rewritten, by any source. To replace one day, re-export it with
+  `--reexport` (see [Re-exporting one committed day](#re-exporting-one-committed-day---reexport)).
+- **Bad-tick rule.** Before candles are built, a tick's bid or ask is dropped
+  when its own other side and its neighbouring ticks contradict it (see
+  [Dropped ticks](#dropped-ticks-the-bad-tick-rule)).
 - **When a day is committed** is the source's decision (its gap rules, below).
   A day with known-permanent gaps is committed as a *partial day* and recorded
   in `{cache}/{SYMBOL}/_partial_days.jsonl` as
@@ -130,6 +133,37 @@ excluded day. The same source does not fetch it again while it still excludes
 it, and fetches it like any other missing day once the exclusion is removed
 from its configuration. The end-of-run summary counts `excluded=` (this run)
 and `already_excluded=` (recorded earlier).
+
+#### Dropped ticks (the bad-tick rule)
+
+A source can deliver one tick whose price on one side is corrupt while the
+other side is correct: for example an ask with one extra digit (ten times too
+large) next to a correct bid. Copied into the candles, it makes a high or a low
+that never traded. The export applies one generic rule, `one_side_outlier`, to
+each fetched unit's ticks before it builds candles. For each tick and side:
+
+- the side's price is **isolated** when it differs by more than
+  `--bad-tick-max-jump` (relative; default `0.1`) from the median of that side
+  over the `--bad-tick-window` ticks before it (default `5`), and from the
+  median over the ticks after it (only one of the two at the edge of a unit);
+- the price is dropped when it is isolated, differs by more than the same
+  fraction from the tick's other side, and that other side is not isolated.
+
+A dropped price goes into neither its side's candles nor its volume; the other
+side of the tick is kept. A fast move on both sides, or a step the next ticks
+follow, is kept. The rule holds no value per instrument, and with the same
+input it always drops the same prices. A day with nothing dropped is written
+exactly as before.
+
+Every dropped price is listed in the day's commit record in `_sources.jsonl`,
+in time order:
+
+```json
+{"day": "2024-01-02", "source": "histdata", "scale_factor": 1.0, "committed_at": "...", "source_unit": "...", "dropped_ticks": [{"ts": "2024-01-02T10:20:00+00:00", "side": "ask", "price": 11.0012, "rule": "one_side_outlier"}]}
+```
+
+A record without `dropped_ticks` is a day the rule removed nothing from. The
+example values are synthetic.
 
 #### Keeping the raw units (`--keep-raw`)
 
@@ -538,6 +572,35 @@ overlap into a second cache with the new source and verify that cache against
 the main one.
 
 ## Repairing a cache
+
+### Re-exporting one committed day (`--reexport`)
+
+A day committed before the bad-tick rule, or with another setting of it, is not
+rebuilt by a normal export ("first committed wins"). To rebuild one day for one
+symbol under the rule, with no hand edit:
+
+```bash
+tradedesk-md-export --source histdata --symbols EURUSD \
+  --from 2024-01-02 --to 2024-01-02 --cache-dir /path/to/cache --reexport
+```
+
+`--reexport` takes exactly one symbol, `--from` equal to `--to`, and a cache
+(not `--no-cache`); the day must already be committed. The source builds the
+day again from its units (a kept unit under `_raw/` first, else a new
+download), and the bad-tick rule runs as in any export. When the source commits
+the day, both day files are replaced atomically and a new record is appended
+to `_sources.jsonl` with `"reexport": true` (and `dropped_ticks` when the rule
+removed anything); for that day, the later record wins. When the source does
+not commit it (a failed download, a gap rule, an exclusion, or the scale
+sentry), the day files and `_sources.jsonl` stay as they were and the export
+exits `1`.
+
+Then check the day as usual, for example against a reference cache:
+
+```bash
+tradedesk-md-verify --reference /path/to/reference --cache-dir /path/to/cache \
+  --symbols EURUSD --from 2024-01-02 --to 2024-01-02 --side ask
+```
 
 ### Normalizing prices into their expected band (`tradedesk-md-normalize`)
 
