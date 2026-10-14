@@ -9,8 +9,11 @@ for the contract and :mod:`tradedesk_marketdata.sources` for the providers):
     {cache}/{SYMBOL}/{YYYY}/{MM0}/{DD}_{bid,ask}.csv.zst   (MM0: Jan=00 .. Dec=11)
 
 - tick to 1-minute candles, split per UTC day, and the day assembly
+- the bad-tick rule (:mod:`tradedesk_marketdata.bad_ticks`), applied to each
+  unit's ticks before candles are built
 - the write-time scale sentry and the atomic commit of a day's two files
-  ("first committed wins": a committed day is never rewritten by any source)
+  ("first committed wins": a committed day is never rewritten by any source,
+  except by an explicit re-export of that one day)
 - the per-symbol ``_sources.jsonl`` (provenance) and ``_partial_days.jsonl``
   (known-permanent gaps) manifests
 - the fetch pool, unit ordering, progress and cancellation
@@ -36,6 +39,7 @@ import pandas as pd
 import zstandard as zstd
 from rich.progress import Progress, TaskID
 
+from .bad_ticks import BadTickRule, DroppedTick
 from .cancel import check_cancelled
 from .scale_sentry import check_scale_consistency
 from .source import (
@@ -54,6 +58,7 @@ from .source import (
 )
 
 __all__ = [
+    "BadTickRule",
     "DEFAULT_CONNECT_TIMEOUT",
     "DEFAULT_READ_TIMEOUT",
     "DEFAULT_RETRIES",
@@ -62,6 +67,10 @@ __all__ = [
 ]
 
 log = logging.getLogger(__name__)
+
+
+class ReexportError(RuntimeError):
+    """A re-export that was refused, or whose day the source did not commit again."""
 
 
 def _symbol_normalise(s: str) -> str:
@@ -266,6 +275,8 @@ def _append_source_manifest(
     source: str,
     scale_factor: float,
     source_unit: str,
+    dropped_ticks: Sequence[DroppedTick] = (),
+    reexport: bool = False,
 ) -> None:
     """Record which source produced a committed day.
 
@@ -273,16 +284,25 @@ def _append_source_manifest(
     cache's raw units (cache price = native price x scale_factor);
     ``source_unit`` names the raw unit(s) the day was built from. One JSON
     object per line, append-only, written once per commit.
+
+    ``dropped_ticks`` adds the day's ``dropped_ticks`` list (the bad-tick
+    rule's removals) and ``reexport`` adds ``"reexport": true`` (the record of
+    a day written again over its earlier commit; the later record wins). A
+    commit with neither writes the record exactly as before.
     """
     manifest = _source_manifest_path(cache_dir, symbol)
     manifest.parent.mkdir(parents=True, exist_ok=True)
-    record = {
+    record: dict[str, object] = {
         "day": day.isoformat(),
         "source": source,
         "scale_factor": scale_factor,
         "committed_at": datetime.now(UTC).isoformat(),
         "source_unit": source_unit,
     }
+    if dropped_ticks:
+        record["dropped_ticks"] = [t.record() for t in dropped_ticks]
+    if reexport:
+        record["reexport"] = True
     with open(manifest, "a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
 
@@ -452,6 +472,8 @@ def export_range(
     timeout: tuple[float, float] = (DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT),
     retries: int = DEFAULT_RETRIES,
     keep_raw: bool = False,
+    bad_tick_rule: BadTickRule | None = BadTickRule(),  # noqa: B008 (frozen, never mutated)
+    reexport: bool = False,
 ) -> tuple[Path | None, Path | None]:
     """Export the UTC days of [start_utc, end_utc_inclusive] of one symbol from ``source``.
 
@@ -476,6 +498,17 @@ def export_range(
       once the exclusion is removed from the source's configuration
     - with ``keep_raw`` the source retains its fetched units under
       ``{cache}/{SYMBOL}/_raw/{source}/`` after commit instead of deleting them
+    - the ``bad_tick_rule`` (default :class:`BadTickRule` with its default
+      thresholds; ``None`` turns it off) removes bad one-side prices from each
+      unit's ticks before candles are built; a committed day with removals
+      lists them under ``dropped_ticks`` in its ``_sources.jsonl`` record
+
+    With ``reexport`` the range must be one day, already committed, and a
+    ``cache_dir`` is required. The day is built from the source again as if it
+    were not committed. When the source commits it, both day files are
+    replaced atomically and a commit record with ``"reexport": true`` is
+    appended. Otherwise the committed files stay as they were and
+    :class:`ReexportError` is raised.
 
     With progress, four tasks per symbol: ``dl`` (units fetched), ``rs``
     (units processed) and ``write`` (range CSVs) when resampling, and
@@ -504,7 +537,18 @@ def export_range(
     while d <= end_utc_inclusive.date():
         days.append(d)
         d += timedelta(days=1)
-    already = {d for d in days if cache_dir is not None and _day_is_committed(cache_dir, symbol, d)}
+    if reexport:
+        if cache_dir is None or len(days) != 1:
+            raise ReexportError("a re-export needs a cache dir and a range of exactly one day")
+        if not _day_is_committed(cache_dir, symbol, days[0]):
+            raise ReexportError(
+                f"{symbol}: {days[0].isoformat()} is not committed; export it without re-export"
+            )
+        already: set[date] = set()
+    else:
+        already = {
+            d for d in days if cache_dir is not None and _day_is_committed(cache_dir, symbol, d)
+        }
     pending = [d for d in days if d not in already]
 
     run = source.open(ctx)
@@ -512,7 +556,7 @@ def export_range(
     # A day this source recorded as excluded stays excluded while the source
     # still says why; it is neither fetched nor recorded again.
     already_excluded: set[date] = set()
-    if cache_dir is not None and pending:
+    if cache_dir is not None and pending and not reexport:
         recorded = _recorded_exclusions(cache_dir, symbol, source.name)
         already_excluded = {d for d in pending if d in recorded and run.excludes(d) is not None}
         if already_excluded:
@@ -569,7 +613,10 @@ def export_range(
     all_ask: list[pd.DataFrame] = []
     day_bid: dict[date, list[pd.DataFrame]] = {}
     day_ask: dict[date, list[pd.DataFrame]] = {}
+    day_dropped: dict[date, list[DroppedTick]] = {}
     days_with_data: set[date] = set()
+    # Why a re-exported day was not written again (empty when it was).
+    reexport_failure: list[str] = []
     # Units still to be processed per pending day; a day is decided at zero.
     remaining: dict[date, int] = dict.fromkeys(pending, 0)
     for unit in units:
@@ -594,6 +641,12 @@ def export_range(
         assert cache_dir is not None
         bid_frames = day_bid.pop(day, [])
         ask_frames = day_ask.pop(day, [])
+        dropped = day_dropped.pop(day, [])
+        if reexport and not isinstance(decision, Commit):
+            # A re-export never records an exclusion over a committed day.
+            reexport_failure.append(f"the source did not commit it: {decision.reason}")
+            advance(cache_task)
+            return
         if isinstance(decision, Leave):
             counts["left_uncommitted"] += 1
             advance(cache_task)
@@ -619,9 +672,11 @@ def export_range(
         advance(cache_task)
         if outcome == "scale_rejected":
             counts["rejected_scale_sentry"] += 1
+            reexport_failure.append("the scale sentry refused it")
             return
         if outcome != "committed":
             counts["left_uncommitted"] += 1
+            reexport_failure.append("its day files could not be written")
             return
         empty = bid_df.empty and ask_df.empty
         counts["committed"] += 1
@@ -635,7 +690,16 @@ def export_range(
             source=source.name,
             scale_factor=prov.scale_factor,
             source_unit=prov.source_unit,
+            dropped_ticks=dropped,
+            reexport=reexport,
         )
+        if dropped:
+            log.info(
+                f"{symbol}: {day.isoformat()} committed without {len(dropped)} bad tick "
+                "price(s); listed in _sources.jsonl"
+            )
+        if reexport:
+            log.info(f"{symbol}: {day.isoformat()} re-exported over its earlier commit")
         if decision.partial is not None:
             counts["committed_partial"] += 1
             _append_partial_day_manifest(
@@ -663,6 +727,11 @@ def export_range(
         """Decode one unit, file its candles under their UTC days, and decide ready days."""
         ticks = run.decode(unit, raw)
         wanted = resample_rule is not None or cache_dir is not None
+        if ticks is not None and len(ticks) and wanted and bad_tick_rule is not None:
+            ticks, dropped = bad_tick_rule.apply(ticks)
+            for t in dropped:
+                if t.ts.date() in pending_set:
+                    day_dropped.setdefault(t.ts.date(), []).append(t)
         if ticks is not None and len(ticks) and wanted:
             for day, part in _split_days(ticks):
                 if day not in pending_set:
@@ -736,6 +805,12 @@ def export_range(
     waiting.clear()
 
     run.finish()
+    if reexport and counts["committed"] != 1:
+        why = reexport_failure[0] if reexport_failure else "the source gave no decision"
+        raise ReexportError(
+            f"{symbol}: {days[0].isoformat()} was not re-exported ({why}); "
+            "its committed day files are unchanged"
+        )
     if cache_dir is not None:
         log.info(
             f"{symbol}: days total={len(days)}, already_cached={len(already)}, "
