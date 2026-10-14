@@ -299,6 +299,47 @@ def test_a_re_export_the_source_does_not_commit_leaves_the_day_as_it_was(tmp_pat
     assert _day_bytes(cache) == before and _records(cache) == records
 
 
+def _fail_the_ask_write(monkeypatch) -> None:
+    real_write = ex._write_daily_candles
+
+    def write(df, path):
+        if "ask" in path.name:
+            raise OSError("SYNTHETIC: the disk refused the ask file")
+        real_write(df, path)
+
+    monkeypatch.setattr(ex, "_write_daily_candles", write)
+
+
+def test_a_re_export_whose_second_write_fails_leaves_both_files_as_they_were(
+    tmp_path, monkeypatch
+) -> None:
+    clean = _quotes(DAY, level=1.1)
+    cache = tmp_path / "cache"
+    _export(cache, _set(clean, 40, "ask", _px(clean, 40, "ask") * 10), bad_tick_rule=None)
+    before, records = _day_bytes(cache), _records(cache)
+    _fail_the_ask_write(monkeypatch)
+
+    # The re-export would change the bid file too: its candles come from other ticks.
+    with pytest.raises(ex.ReexportError, match="could not be written\\); .* are unchanged"):
+        _export(cache, _quotes(DAY, level=1.2), reexport=True)
+
+    assert _day_bytes(cache) == before and _records(cache) == records
+    assert not list(cache.rglob("*.tmp"))
+
+
+def test_a_new_day_whose_second_write_fails_is_not_left_half_committed(
+    tmp_path, monkeypatch
+) -> None:
+    cache = tmp_path / "cache"
+    _fail_the_ask_write(monkeypatch)
+
+    _export(cache, _quotes(DAY, level=1.1))
+
+    assert not ex._daily_candle_path(cache, SYMBOL, DAY, "bid").exists()
+    assert not ex._daily_candle_path(cache, SYMBOL, DAY, "ask").exists()
+    assert not ex._source_manifest_path(cache, SYMBOL).exists()
+
+
 def test_a_re_export_needs_one_committed_day(tmp_path) -> None:
     ticks = _quotes(DAY, level=1.1)
     with pytest.raises(ex.ReexportError, match="is not committed"):

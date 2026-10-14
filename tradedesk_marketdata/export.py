@@ -239,7 +239,10 @@ def _commit_day(
     """Scale-check a day and write its bid and ask candle files.
 
     Returns ``"committed"``, ``"scale_rejected"`` (the scale sentry refused the
-    day; nothing written) or ``"write_failed"``.
+    day; nothing written), ``"write_failed"`` or ``"restore_failed"``. The two
+    files are one commit: when either write fails, both files are put back as
+    they were before the call (restored over a re-exported day, removed from a
+    new one); ``"restore_failed"`` says that this too failed.
 
     Scale-discontinuity sentry: refuse to write a daily candle CSV whose median
     close diverges from the existing neighbour cache. That class of mismatch is
@@ -253,13 +256,37 @@ def _commit_day(
             log.error(reason)
             return "scale_rejected"
 
+    paths = {side: _daily_candle_path(cache_dir, symbol, day, side) for side in ("bid", "ask")}
+    before = {side: path.read_bytes() if path.exists() else None for side, path in paths.items()}
     for side, df in (("bid", bid_df), ("ask", ask_df)):
         try:
-            _write_daily_candles(df, _daily_candle_path(cache_dir, symbol, day, side))
+            _write_daily_candles(df, paths[side])
         except Exception as e:
             log.warning(f"{symbol}: failed to write daily {side} candle CSV for {day}: {e}")
-            return "write_failed"
+            return "write_failed" if _restore_day_files(paths, before) else "restore_failed"
     return "committed"
+
+
+def _restore_day_files(paths: dict[str, Path], before: dict[str, bytes | None]) -> bool:
+    """Put a day's candle files back to the bytes they had before a failed commit.
+
+    Returns False when a file could not be put back.
+    """
+    restored = True
+    for side, path in paths.items():
+        try:
+            path.with_suffix(path.suffix + ".tmp").unlink(missing_ok=True)
+            data = before[side]
+            if data is None:
+                path.unlink(missing_ok=True)
+            elif not path.exists() or path.read_bytes() != data:
+                tmp = path.with_suffix(path.suffix + ".tmp")
+                tmp.write_bytes(data)
+                tmp.replace(path)
+        except Exception as e:
+            log.error(f"failed to restore {path} after a failed day commit: {e}")
+            restored = False
+    return restored
 
 
 def _source_manifest_path(cache_dir: Path, symbol: str) -> Path:
@@ -617,6 +644,8 @@ def export_range(
     days_with_data: set[date] = set()
     # Why a re-exported day was not written again (empty when it was).
     reexport_failure: list[str] = []
+    # False when a failed write could not put the committed day files back.
+    files_unchanged = [True]
     # Units still to be processed per pending day; a day is decided at zero.
     remaining: dict[date, int] = dict.fromkeys(pending, 0)
     for unit in units:
@@ -676,7 +705,11 @@ def export_range(
             return
         if outcome != "committed":
             counts["left_uncommitted"] += 1
-            reexport_failure.append("its day files could not be written")
+            if outcome == "restore_failed":
+                reexport_failure.append("its day files could not be written nor restored")
+                files_unchanged[0] = False
+            else:
+                reexport_failure.append("its day files could not be written")
             return
         empty = bid_df.empty and ask_df.empty
         counts["committed"] += 1
@@ -809,7 +842,11 @@ def export_range(
         why = reexport_failure[0] if reexport_failure else "the source gave no decision"
         raise ReexportError(
             f"{symbol}: {days[0].isoformat()} was not re-exported ({why}); "
-            "its committed day files are unchanged"
+            + (
+                "its committed day files are unchanged"
+                if files_unchanged[0]
+                else "its committed day files may have changed; check them"
+            )
         )
     if cache_dir is not None:
         log.info(
