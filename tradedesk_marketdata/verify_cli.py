@@ -19,7 +19,7 @@ from pathlib import Path
 
 from . import verify as v
 from .cancel import cancellation
-from .export import _symbol_normalise
+from .export import FloorError, _symbol_normalise
 
 
 def _day(text: str) -> date:
@@ -107,6 +107,8 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
+    except FloorError as e:
+        parser.error(str(e))
 
     if args.format == "json":
         json.dump(v.render_json(reports), sys.stdout, indent=2)
