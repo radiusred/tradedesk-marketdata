@@ -420,6 +420,26 @@ def test_verify_does_not_report_the_days_before_the_floor(tmp_path, capsys):
     assert [d["day"] for d in rep["days"]] == [d.isoformat() for d in _days(FLOOR, LAST)]
 
 
+def test_verify_of_a_range_wholly_before_the_floor_has_no_no_overlap_finding(tmp_path, capsys):
+    _store(tmp_path / "ref")
+    _store(tmp_path / "cache")
+    _floor(tmp_path)
+    capsys.readouterr()
+
+    code = verify_cli.main(
+        ["--reference", str(tmp_path / "ref"), "--cache-dir", str(tmp_path / "cache")]
+        + ["--symbols", SYMBOL, "--from", FIRST.isoformat()]
+        + ["--to", (FLOOR - timedelta(days=1)).isoformat(), "--format", "json"]
+    )
+
+    assert code == 0
+    [rep] = json.loads(capsys.readouterr().out)["symbols"]
+    assert rep["floor"] == "2024-01-15"
+    assert rep["compared"] == 0
+    assert rep["days"] == []
+    assert rep["findings"] == []
+
+
 def test_verify_names_the_floor_in_its_text_report(tmp_path, capsys):
     _store(tmp_path / "ref")
     _store(tmp_path / "cache")

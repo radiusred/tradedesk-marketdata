@@ -364,9 +364,19 @@ def _span(run: Sequence[DayResult]) -> str:
 
 
 def summarise(
-    symbol: str, days: Sequence[DayResult], *, tolerance: float, floor: date | None = None
+    symbol: str,
+    days: Sequence[DayResult],
+    *,
+    tolerance: float,
+    floor: date | None = None,
+    eligible: int | None = None,
 ) -> SymbolReport:
-    """Per-year statistics, ratio regimes and findings for one symbol's compared days."""
+    """Per-year statistics, ratio regimes and findings for one symbol's compared days.
+
+    ``eligible`` is the number of days in the range on or after the floor. When it
+    is 0 the whole range is before the floor: nothing was due for comparison, so
+    there is no ``no-overlap`` finding.
+    """
     report = SymbolReport(symbol, sorted(days, key=lambda d: d.day), floor=floor)
     for d in report.days:
         y = report.years.setdefault(
@@ -430,7 +440,7 @@ def summarise(
                     "the day was not compared",
                 )
             )
-    if report.compared == 0:
+    if report.compared == 0 and eligible != 0:
         lefts = sum(1 for d in report.days if d.status == "only-left")
         rights = sum(1 for d in report.days if d.status == "only-right")
         report.findings.append(
@@ -475,6 +485,10 @@ def verify(
     :class:`~tradedesk_marketdata.export.FloorError`.
     """
     floors = {s: read_floor(cache, s) for s in symbols}
+    eligible = {
+        s: sum(1 for d in _days(first, last) if floors[s] is None or d >= floors[s])
+        for s in symbols
+    }
     jobs = [
         (s, d)
         for s in symbols
@@ -512,7 +526,10 @@ def verify(
         raise
     finally:
         executor.shutdown(wait=not interrupted, cancel_futures=interrupted)
-    return [summarise(s, results[s], tolerance=tolerance, floor=floors[s]) for s in symbols]
+    return [
+        summarise(s, results[s], tolerance=tolerance, floor=floors[s], eligible=eligible[s])
+        for s in symbols
+    ]
 
 
 # ---------------------------------------------------------------------------
