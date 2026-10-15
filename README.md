@@ -96,6 +96,9 @@ therefore stored identically:
 - **First committed wins.** A day that already has both candle files is never
   fetched or rewritten, by any source. To replace one day, re-export it with
   `--reexport` (see [Re-exporting one committed day](#re-exporting-one-committed-day---reexport)).
+- **Earliest-date floor.** A symbol with a floor in
+  `{cache}/{SYMBOL}/_floor.json` gets no day before it, from any source (see
+  [Retiring a symbol's oldest days](#retiring-a-symbols-oldest-days-tradedesk-md-floor)).
 - **Bad-tick rule.** Before candles are built, a tick's bid or ask is dropped
   when its own other side and its neighbouring ticks contradict it (see
   [Dropped ticks](#dropped-ticks-the-bad-tick-rule)).
@@ -543,7 +546,10 @@ Per symbol and year it prints the counts by status and the worst and median
 daily difference. It then prints the **close-ratio regimes**: runs of days
 whose reference/cache close ratio stays within 5% of one value.
 `--format json` gives the same as one document, with every day's record.
-`--side ask` compares the ask files instead of the bid ones.
+`--side ask` compares the ask files instead of the bid ones. A symbol with an
+[earliest-date floor](#retiring-a-symbols-oldest-days-tradedesk-md-floor) in
+`--cache-dir` is compared from its floor on: the days before it are not
+compared, counted or reported as missing, and the report names the floor.
 
 The findings are one line each. Here, with illustrative dates and counts, is
 how the three HistData defects showed before they were repaired:
@@ -601,6 +607,56 @@ Then check the day as usual, for example against a reference cache:
 tradedesk-md-verify --reference /path/to/reference --cache-dir /path/to/cache \
   --symbols EURUSD --from 2024-01-02 --to 2024-01-02 --side ask
 ```
+
+### Retiring a symbol's oldest days (`tradedesk-md-floor`)
+
+When a symbol's source is not reliable before some date, set that date as the
+symbol's earliest-available day (its *floor*). No hand edit is needed:
+
+```bash
+tradedesk-md-floor --cache-dir /path/to/cache --symbol SYMBOL \
+  --floor YYYY-MM-DD --backup-dir /path/to/retired --dry-run
+tradedesk-md-floor --cache-dir /path/to/cache --symbol SYMBOL \
+  --floor YYYY-MM-DD --backup-dir /path/to/retired
+```
+
+- **Nothing is deleted.** Every day file before the floor moves to
+  `{backup-dir}/{SYMBOL}/{YYYY}/{MM0}/{DD}_{bid,ask}.csv.zst`, the store's own
+  layout. Each file is copied and its bytes checked before the live file is
+  removed. The `_sources.jsonl` and `_partial_days.jsonl` lines of those days
+  move to the same file names under `{backup-dir}/{SYMBOL}/`. The days on and
+  after the floor are not touched.
+- **The floor** is written to `{cache}/{SYMBOL}/_floor.json`:
+
+  ```json
+  {"floor": "2024-01-15", "set_at": "...", "tool_version": "2.0.0"}
+  ```
+
+- **The record.** Every change appends one line to the live `_sources.jsonl`:
+
+  ```json
+  {"status": "floor", "action": "set", "floor": "2024-01-15", "previous": null, "days_moved": 14, "backup_dir": "/path/to/retired", "tool_version": "2.0.0", "decided_at": "..."}
+  ```
+
+  `action` is `set`, `lower` or `remove`; `previous` is the floor before the
+  change. A record with a `status` is not a commit, so the manifest stays a
+  manifest of the days that remain.
+- **After the floor is set**, an export does not plan, fetch or write a day
+  before it, `--reexport` of such a day is refused, and `tradedesk-md-verify`
+  does not check one.
+- **The same floor again** with no day before it left in the store writes
+  nothing. A run stopped part way is completed by running it again.
+- **A later floor** moves the next days the same way. **A lower floor** is
+  refused unless you add `--lower`. `--remove` removes the floor. Both are
+  recorded. Neither brings the moved days back; export them again if you
+  want them.
+- **Refusals** (exit `1`, nothing changed): a symbol not in the cache, a
+  lower floor without `--lower`, a `--backup-dir` inside the cache, a backup
+  file that exists with other bytes, or a `_floor.json` that does not parse.
+  An export or a verify also stops on a `_floor.json` that does not parse.
+
+The sha256 of `_sources.jsonl` changes with every floor change, like with any
+other change to the store.
 
 ### Normalizing prices into their expected band (`tradedesk-md-normalize`)
 
