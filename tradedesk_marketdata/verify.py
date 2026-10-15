@@ -485,10 +485,10 @@ def verify(
     :class:`~tradedesk_marketdata.export.FloorError`.
     """
     floors = {s: read_floor(cache, s) for s in symbols}
-    eligible = {
-        s: sum(1 for d in _days(first, last) if floors[s] is None or d >= floors[s])
-        for s in symbols
-    }
+    eligible: dict[str, int] = {}
+    for s in symbols:
+        floor = floors[s]
+        eligible[s] = sum(1 for d in _days(first, last) if floor is None or d >= floor)
     jobs = [
         (s, d)
         for s in symbols
