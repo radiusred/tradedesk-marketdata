@@ -27,6 +27,10 @@ actionable line per run of shifted days, per run of different days, per
 regime other than 1.0, per unreadable day file, and one when no day of the
 symbol has data on both sides (``no-overlap``: a mistyped symbol or cache
 directory must not pass as a clean result).
+
+A symbol with an earliest-date floor in the checked cache
+(:func:`~tradedesk_marketdata.export.read_floor`) is compared from its floor
+on: the days before it are not compared, counted or reported.
 """
 
 from __future__ import annotations
@@ -45,7 +49,7 @@ import numpy as np
 import pandas as pd
 
 from .cancel import cancellation, check_cancelled
-from .export import _daily_candle_path, _load_daily_candles
+from .export import _daily_candle_path, _load_daily_candles, read_floor
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +133,8 @@ class SymbolReport:
     years: dict[int, dict[str, Any]] = field(default_factory=dict)
     regimes: list[Regime] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
+    #: The checked cache's floor for the symbol: days before it were not compared.
+    floor: date | None = None
 
     @property
     def failed(self) -> bool:
@@ -144,6 +150,7 @@ class SymbolReport:
             "symbol": self.symbol,
             "failed": self.failed,
             "compared": self.compared,
+            "floor": self.floor.isoformat() if self.floor else None,
             "findings": [f.as_json() for f in self.findings],
             "years": {str(y): v for y, v in self.years.items()},
             "regimes": [r.as_json() for r in self.regimes],
@@ -356,9 +363,11 @@ def _span(run: Sequence[DayResult]) -> str:
     return a.isoformat() if a == b else f"{a.isoformat()}..{b.isoformat()}"
 
 
-def summarise(symbol: str, days: Sequence[DayResult], *, tolerance: float) -> SymbolReport:
+def summarise(
+    symbol: str, days: Sequence[DayResult], *, tolerance: float, floor: date | None = None
+) -> SymbolReport:
     """Per-year statistics, ratio regimes and findings for one symbol's compared days."""
-    report = SymbolReport(symbol, sorted(days, key=lambda d: d.day))
+    report = SymbolReport(symbol, sorted(days, key=lambda d: d.day), floor=floor)
     for d in report.days:
         y = report.years.setdefault(
             d.day.year, {"counts": dict.fromkeys(STATUSES, 0), "_diffs": []}
@@ -429,7 +438,8 @@ def summarise(symbol: str, days: Sequence[DayResult], *, tolerance: float) -> Sy
                 "no-overlap",
                 f"{symbol}: no day in the range has data on both sides ({lefts} day(s) only in "
                 f"the reference, {rights} only in the cache), so nothing was compared; check "
-                "--symbols, --reference, --cache-dir and the dates",
+                "--symbols, --reference, --cache-dir and the dates"
+                + (f" (the cache's floor is {report.floor})" if report.floor else ""),
             )
         )
     return report
@@ -460,9 +470,17 @@ def verify(
     """Compare every symbol-day in [first, last]; reads only, in parallel.
 
     A pending cancel (``cancel.cancellation``) stops the run: queued days are
-    dropped and ``KeyboardInterrupt`` is raised.
+    dropped and ``KeyboardInterrupt`` is raised. A symbol's days before its
+    floor in ``cache`` are skipped; a floor file that does not parse raises
+    :class:`~tradedesk_marketdata.export.FloorError`.
     """
-    jobs = [(s, d) for s in symbols for d in _days(first, last)]
+    floors = {s: read_floor(cache, s) for s in symbols}
+    jobs = [
+        (s, d)
+        for s in symbols
+        for d in _days(first, last)
+        if (floor := floors[s]) is None or d >= floor
+    ]
     results: dict[str, list[DayResult]] = {s: [] for s in symbols}
     executor = ThreadPoolExecutor(max_workers=max(1, workers))
     interrupted = False
@@ -494,7 +512,7 @@ def verify(
         raise
     finally:
         executor.shutdown(wait=not interrupted, cancel_futures=interrupted)
-    return [summarise(s, results[s], tolerance=tolerance) for s in symbols]
+    return [summarise(s, results[s], tolerance=tolerance, floor=floors[s]) for s in symbols]
 
 
 # ---------------------------------------------------------------------------
@@ -524,6 +542,11 @@ def render_text(reports: Sequence[SymbolReport]) -> str:
             span = r.first.isoformat() if r.first == r.last else f"{r.first}..{r.last}"
             mark = "" if r.is_unity else "  <-"
             lines.append(f"  {rep.symbol} {span}: {r.ratio:.6g} ({r.days} day(s)){mark}")
+    floored = [rep for rep in reports if rep.floor is not None]
+    if floored:
+        lines.append("")
+        lines.append("Floors (days before them not compared):")
+        lines.extend(f"  {rep.symbol} {rep.floor}" for rep in floored)
     findings = [f for rep in reports for f in rep.findings]
     total = sum(rep.compared for rep in reports)
     per_symbol = ", ".join(f"{rep.symbol} {rep.compared}" for rep in reports)

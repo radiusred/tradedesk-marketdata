@@ -16,6 +16,8 @@ for the contract and :mod:`tradedesk_marketdata.sources` for the providers):
   except by an explicit re-export of that one day)
 - the per-symbol ``_sources.jsonl`` (provenance) and ``_partial_days.jsonl``
   (known-permanent gaps) manifests
+- the per-symbol earliest-date floor, ``_floor.json``: no day before it is
+  exported (set by :mod:`tradedesk_marketdata.floor`)
 - the fetch pool, unit ordering, progress and cancellation
 - the range CSVs, one per price side, resampled once over the whole range
 
@@ -467,6 +469,31 @@ def _append_partial_day_manifest(
         f.write(json.dumps(record) + "\n")
 
 
+class FloorError(ValueError):
+    """A floor file that does not parse, or a floor change that was refused."""
+
+
+def _floor_path(cache_dir: Path, symbol: str) -> Path:
+    """Path to a symbol's earliest-date floor (see :mod:`tradedesk_marketdata.floor`)."""
+    return cache_dir / symbol / "_floor.json"
+
+
+def read_floor(cache_dir: Path, symbol: str) -> date | None:
+    """The symbol's earliest-available day in ``cache_dir``, or None when it has no floor.
+
+    Days before the floor are not in the store, are never exported into it and
+    are not checked by verify. A floor file that does not parse raises
+    :class:`FloorError`: ignoring it would let an export bring the days back.
+    """
+    path = _floor_path(cache_dir, symbol)
+    if not path.exists():
+        return None
+    try:
+        return date.fromisoformat(json.loads(path.read_text(encoding="utf-8"))["floor"])
+    except (ValueError, KeyError, TypeError) as e:
+        raise FloorError(f"{path}: not a floor file ({e})") from None
+
+
 def _load_daily_candles(path: Path) -> pd.DataFrame | None:
     """Read a Zstandard-compressed 1-min candle CSV. Returns None on missing file or parse error."""
     try:
@@ -537,6 +564,12 @@ def export_range(
     appended. Otherwise the committed files stay as they were and
     :class:`ReexportError` is raised.
 
+    With a ``cache_dir`` and a floor for the symbol (:func:`read_floor`), the
+    days before the floor are dropped from the range: they are not planned,
+    fetched, committed or written to the range CSVs. A range wholly before the
+    floor does nothing and returns (None, None); a re-export of a day before
+    the floor raises :class:`ReexportError`.
+
     With progress, four tasks per symbol: ``dl`` (units fetched), ``rs``
     (units processed) and ``write`` (range CSVs) when resampling, and
     ``cache`` (days decided) when caching.
@@ -564,6 +597,18 @@ def export_range(
     while d <= end_utc_inclusive.date():
         days.append(d)
         d += timedelta(days=1)
+    floor = read_floor(cache_dir, symbol) if cache_dir is not None else None
+    if floor is not None and days and days[0] < floor:
+        if reexport:
+            raise ReexportError(
+                f"{symbol}: {days[0].isoformat()} is before the symbol's floor "
+                f"{floor.isoformat()}; lower or remove the floor first"
+            )
+        below = sum(1 for d in days if d < floor)
+        log.info(f"{symbol}: {below} day(s) before the floor {floor.isoformat()}; not exported")
+        days = [d for d in days if d >= floor]
+        if not days:
+            return (None, None)
     if reexport:
         if cache_dir is None or len(days) != 1:
             raise ReexportError("a re-export needs a cache dir and a range of exactly one day")
