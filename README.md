@@ -658,6 +658,130 @@ tradedesk-md-floor --cache-dir /path/to/cache --symbol SYMBOL \
 The sha256 of `_sources.jsonl` changes with every floor change, like with any
 other change to the store.
 
+### Refreshing a store (`tradedesk-md-refresh`)
+
+One command keeps a store current: it re-checks a window of days, adds the new
+days, re-fetches the empty or partial ones, backs up every change first and
+writes a report. It is made to run once a week:
+
+```bash
+tradedesk-md-refresh --cache-dir /path/to/cache --since YYYY-MM-DD \
+  --backup-dir /path/to/backups --report refresh.json --dry-run
+tradedesk-md-refresh --cache-dir /path/to/cache --since YYYY-MM-DD \
+  --backup-dir /path/to/backups --report refresh.json
+```
+
+The command is an orchestrator over the export: every day file and manifest
+line is written by the same code as a `tradedesk-md-export` run, with the same
+scale sentry and the same atomic commit. Per symbol (`--symbols`, or every
+symbol in the store that the HistData symbol map holds):
+
+1. **Scan** the window, `--since` to `--until` (default: today, UTC). A day
+   with no day files is *missing*. A weekday (Monday to Friday) is *empty* when
+   its day files hold no candle, and *partial* when its latest
+   `_partial_days.jsonl` record is not older than its latest commit record in
+   `_sources.jsonl`. An empty or partial weekday on a market-closure day
+   (25 December, 1 January, and each `--closure MM-DD`) is skipped.
+2. **HistData** (the primary source): one export of the window, with the empty
+   and partial weekdays rechecked. Each month file is fetched once (from
+   HistData itself, not from a staged copy, when the month holds a rechecked
+   day) and serves every missing and rechecked day in it. Missing days are
+   added up to the newest day HistData has published; a later day is left for
+   the next run. A complete day is never planned or rewritten. A rechecked day
+   is re-exported only when HistData now has ticks for it and they differ from
+   the stored day; a day whose fresh data is identical stays as it is and gets
+   no `_sources.jsonl` line.
+3. **Fallback** (only with `--fallback-source dukascopy`): each weekday up to
+   the newest day with candles that is still missing or empty, and not a
+   closure, is exported from Dukascopy, one day per run. The fallback must
+   write the store's units, so each symbol needs its price divisor:
+   `--price-divisor SYMBOL=N` (repeatable) or `--price-divisors FILE`, a TOML
+   file of `SYMBOL = N` lines (the flag wins). A symbol without one is refused
+   before any request. The scale sentry refuses a day at another scale; it is
+   reported under `refused`. `--fallback-only FILE` (one `YYYY-MM-DD` per line,
+   `#` comments) limits the fallback to the days named there. The
+   `--connect-timeout`, `--read-timeout` and `--retries` options apply to both
+   sources. Without `--fallback-source`, no Dukascopy request is made.
+
+**Backups.** A run that may change the store needs `--backup-dir`, outside the
+store; without one it is refused before any request. Each run writes under
+`{backup-dir}/{YYYYMMDDTHHMMSSZ}/{SYMBOL}/`, in the store's layout: before the
+first change to a symbol, its `_sources.jsonl` and `_partial_days.jsonl`; before
+each day is written, that day's current bid and ask files. Every copy is
+checked against its source bytes. A new day has no files to copy.
+
+**Dry run.** `--dry-run` makes no request and writes nothing (no backup
+either). Its report lists, per symbol, the days the run would add
+(`would_add`), recheck (`would_recheck`) and send to the fallback
+(`would_fallback`); whether a rechecked day changes is known only after the
+fetch.
+
+**The report** (`--report PATH`, JSON, `schema_version` 1):
+
+| Field | Meaning |
+|-------|---------|
+| `since`, `until` | the window |
+| `dry_run`, `primary_source`, `fallback_source` | how the run was made |
+| `backup_dir` | this run's backup directory (`null` in a dry run) |
+| `changed` | `true` when any symbol's `_sources.jsonl` changed |
+| `skipped_symbols` | store symbols not refreshed, with the reason |
+| `symbols[]` | one entry per symbol, below |
+
+| Per-symbol field | Meaning |
+|------------------|---------|
+| `added` | days that were missing and are now committed, each `{day, source}` |
+| `reexported` | empty or partial days written again, each `{day, source}` |
+| `unchanged` | rechecked days whose fresh data was identical |
+| `still_empty` | weekdays up to `newest_day`, not closures, still missing or empty after the run |
+| `skipped_closures` | empty or partial weekdays on a closure day, not rechecked |
+| `refused` | days not written, each `{day, source, reason}` (`scale_sentry`, `write_failed`) |
+| `excluded` | days the source's exclusion spans recorded as excluded, each `{day, source}` |
+| `newest_day` | the newest day with candles in the window after the HistData step |
+| `sources_sha256_before`, `sources_sha256_after` | sha256 of `_sources.jsonl` (`null` when absent) |
+| `changed` | `true` when the two digests differ |
+| `error` | why the symbol's refresh stopped, or `null` |
+
+Example (synthetic: the symbol `TESTSYM` and its days are made up):
+
+```json
+{
+  "schema_version": 1,
+  "tool_version": "2.0.0",
+  "generated_at": "2015-01-25T06:00:04+00:00",
+  "since": "2014-12-29",
+  "until": "2015-01-25",
+  "dry_run": false,
+  "primary_source": "histdata",
+  "fallback_source": "dukascopy",
+  "backup_dir": "/path/to/backups/20150125T060000Z",
+  "changed": true,
+  "symbols": [
+    {
+      "symbol": "TESTSYM",
+      "changed": true,
+      "added": [{"day": "2015-01-17", "source": "histdata"}, {"day": "2015-01-18", "source": "histdata"}],
+      "reexported": [{"day": "2015-01-14", "source": "dukascopy"}],
+      "unchanged": ["2015-01-09"],
+      "still_empty": [],
+      "skipped_closures": ["2015-01-01"],
+      "refused": [],
+      "excluded": [],
+      "newest_day": "2015-01-23",
+      "sources_sha256_before": "3f1c…",
+      "sources_sha256_after": "9a0e…",
+      "error": null
+    }
+  ],
+  "skipped_symbols": {}
+}
+```
+
+The last line of output is the run's summary, `tradedesk-md-refresh: no
+change: …` when nothing changed. Exit status: `0` when the run completed (days
+still empty are reported, not an error); `1` when a day was refused, a
+symbol's refresh failed, or the run was refused before any change (for
+example a `--backup-dir` inside the store); `2` on a usage error.
+
 ### Normalizing prices into their expected band (`tradedesk-md-normalize`)
 
 If you already populated `--cache-dir` with the wrong price scale, the package
