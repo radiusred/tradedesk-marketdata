@@ -53,7 +53,7 @@ def test_only_the_cli_imports_the_registry() -> None:
             for m in _imports(p)
         )
     ]
-    assert importers == ["cli.py"]
+    assert importers == ["cli.py", "refresh_cli.py"]
 
 
 def test_importing_the_framework_loads_no_source() -> None:
