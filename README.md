@@ -662,13 +662,29 @@ other change to the store.
 
 One command keeps a store current: it re-checks a window of days, adds the new
 days, re-fetches the empty or partial ones, backs up every change first and
-writes a report. It is made to run once a week:
+writes a report. It is made to run once a week.
+
+This example runs as written. It installs the package, makes an empty store
+and does a dry run on it. The dry run plans the work, writes the report and
+changes nothing in the store:
 
 ```bash
-tradedesk-md-refresh --cache-dir /path/to/cache --since YYYY-MM-DD \
-  --backup-dir /path/to/backups --report refresh.json --dry-run
-tradedesk-md-refresh --cache-dir /path/to/cache --since YYYY-MM-DD \
-  --backup-dir /path/to/backups --report refresh.json
+pip install tradedesk-marketdata
+mkdir -p ./cache
+tradedesk-md-refresh --cache-dir ./cache --since 2026-10-01 --until 2026-10-09 \
+  --backup-dir ./backups --report refresh.json --dry-run
+```
+
+On an empty store it prints `would add 0, recheck 0 and send 0 day(s) to the
+fallback`. On a real store, use your own paths and start day (template; replace
+the values in angle brackets). Run the dry run first, read the report, then run
+it again without `--dry-run`:
+
+```bash
+tradedesk-md-refresh --cache-dir <cache-dir> --since <YYYY-MM-DD> \
+  --backup-dir <backup-dir> --report refresh.json --dry-run
+tradedesk-md-refresh --cache-dir <cache-dir> --since <YYYY-MM-DD> \
+  --backup-dir <backup-dir> --report refresh.json
 ```
 
 The command is an orchestrator over the export: every day file and manifest
