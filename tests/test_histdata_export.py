@@ -103,6 +103,27 @@ def test_settled_month_zip_is_reused_then_dropped_once_its_days_are_committed(ja
     assert not jan_zip.exists()  # every day January's file covers is now committed
 
 
+def test_refetch_downloads_a_month_its_staged_zip_would_serve(jan_2015, tmp_path):
+    cache = tmp_path / "cache"
+    _run(cache, date(2015, 1, 1), date(2015, 1, 31))
+    assert hd._zip_path(cache, SYMBOL, (2015, 1)).exists()
+    jan_2015.calls.clear()
+
+    ex.export_range(
+        source=hd.HistDataSource(),
+        symbol=SYMBOL,
+        start_utc=datetime(2015, 1, 14, tzinfo=UTC),
+        end_utc_inclusive=datetime(2015, 1, 14, tzinfo=UTC),
+        out=tmp_path / "out",
+        resample_rule=None,
+        cache_dir=cache,
+        recheck={date(2015, 1, 14)},
+        refetch=True,
+    )
+
+    assert jan_2015.calls == [(2015, 1)]  # a recheck sees the provider's current file
+
+
 def test_corrupt_cached_zip_is_fetched_again(jan_2015, tmp_path):
     cache = tmp_path / "cache"
     zpath = hd._zip_path(cache, SYMBOL, (2015, 1))
