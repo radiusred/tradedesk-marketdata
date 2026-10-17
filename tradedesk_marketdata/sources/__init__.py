@@ -60,4 +60,17 @@ def create(name: str, options: Mapping[str, Any] | None = None) -> Source:
 register(DukascopySource)
 register(HistDataSource)
 
-__all__ = ["UnknownSourceError", "create", "get", "names", "register"]
+#: tradedesk-md-refresh's primary source, and the sources ``--fallback-source`` accepts.
+#: The fallback is configured with ``{"price_divisor": N}`` per symbol.
+REFRESH_PRIMARY = HistDataSource.name
+REFRESH_FALLBACKS: tuple[str, ...] = (DukascopySource.name,)
+
+__all__ = [
+    "REFRESH_FALLBACKS",
+    "REFRESH_PRIMARY",
+    "UnknownSourceError",
+    "create",
+    "get",
+    "names",
+    "register",
+]
