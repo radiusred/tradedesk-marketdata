@@ -705,7 +705,7 @@ class _HistDataRun(SourceRun):
         if ym < self.inst.first_month:
             return _BEFORE_FIRST
         staged = self._staged(ym)
-        if staged is not None:
+        if staged is not None and not self.ctx.refetch:
             cached = staged if staged.exists() else self.ctx.kept_raw(_zip_relpath(ym))
             if cached is not None:
                 mtime = datetime.fromtimestamp(cached.stat().st_mtime, UTC)

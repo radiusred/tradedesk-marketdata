@@ -223,6 +223,10 @@ class RunContext:
     timeout: tuple[float, float] = (DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT)
     retries: int = DEFAULT_RETRIES
     keep_raw: bool = False
+    #: Fetch every unit from the provider, not from a staged or kept copy: a
+    #: recheck wants the provider's current file. A source whose published
+    #: units never change may ignore it.
+    refetch: bool = False
 
     def raw_path(self, relpath: str) -> Path | None:
         """Where ``--keep-raw`` retains a raw unit: ``{cache}/{SYMBOL}/_raw/{source}/{relpath}``."""

@@ -31,7 +31,7 @@ with UTC timestamps rendered as ``YYYY-MM-DD HH:MM:SS+00:00``.
 import io
 import json
 import logging
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -194,16 +194,41 @@ def _candles_to_candles(df: pd.DataFrame, resample_rule: str) -> pd.DataFrame:
     return out.dropna(subset=["open"])
 
 
+def _day_csv_bytes(df: pd.DataFrame) -> bytes:
+    """A 1-min candle DataFrame as the uncompressed CSV bytes of its day file."""
+    out = df.copy()
+    out.index.name = "timestamp"
+    return out.reset_index().to_csv(index=False).encode("utf-8")
+
+
 def _write_daily_candles(df: pd.DataFrame, path: Path) -> None:
     """Atomically write a 1-min candle DataFrame as a Zstandard-compressed CSV (level 3)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    out = df.copy()
-    out.index.name = "timestamp"
     cctx = zstd.ZstdCompressor(level=3)
-    compressed = cctx.compress(out.reset_index().to_csv(index=False).encode("utf-8"))
+    compressed = cctx.compress(_day_csv_bytes(df))
     tmp.write_bytes(compressed)
     tmp.replace(path)
+
+
+def _read_day_csv_bytes(path: Path) -> bytes | None:
+    """A day file's uncompressed CSV bytes, or None when it is missing or does not decompress."""
+    try:
+        with open(path, "rb") as f_in, zstd.ZstdDecompressor().stream_reader(f_in) as reader:
+            return reader.read()
+    except (OSError, zstd.ZstdError):
+        return None
+
+
+def _day_unchanged(
+    cache_dir: Path, symbol: str, day: date, bid_df: pd.DataFrame, ask_df: pd.DataFrame
+) -> bool:
+    """True when both of a committed day's files hold exactly the CSV these frames render to."""
+    for side, df in (("bid", bid_df), ("ask", ask_df)):
+        stored = _read_day_csv_bytes(_daily_candle_path(cache_dir, symbol, day, side))
+        if stored is None or stored != _day_csv_bytes(df):
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +261,13 @@ def _assemble_day(frames: list[pd.DataFrame]) -> pd.DataFrame:
 
 
 def _commit_day(
-    cache_dir: Path, symbol: str, day: date, bid_df: pd.DataFrame, ask_df: pd.DataFrame
+    cache_dir: Path,
+    symbol: str,
+    day: date,
+    bid_df: pd.DataFrame,
+    ask_df: pd.DataFrame,
+    *,
+    before_write: Callable[[], None] | None = None,
 ) -> str:
     """Scale-check a day and write its bid and ask candle files.
 
@@ -250,6 +281,9 @@ def _commit_day(
     close diverges from the existing neighbour cache. That class of mismatch is
     silent in backtests and produces order-of-magnitude wrong PnL across the
     boundary.
+
+    ``before_write`` is called once the scale sentry has passed the day, just
+    before its files are written (a caller's backup).
     """
     if not bid_df.empty:
         new_median = float(bid_df["close"].median())
@@ -258,6 +292,8 @@ def _commit_day(
             log.error(reason)
             return "scale_rejected"
 
+    if before_write is not None:
+        before_write()
     paths = {side: _daily_candle_path(cache_dir, symbol, day, side) for side in ("bid", "ask")}
     before = {side: path.read_bytes() if path.exists() else None for side, path in paths.items()}
     for side, df in (("bid", bid_df), ("ask", ask_df)):
@@ -528,6 +564,10 @@ def export_range(
     keep_raw: bool = False,
     bad_tick_rule: BadTickRule | None = BadTickRule(),  # noqa: B008 (frozen, never mutated)
     reexport: bool = False,
+    recheck: Collection[date] = (),
+    outcomes: dict[date, str] | None = None,
+    before_change: Callable[[date], None] | None = None,
+    refetch: bool = False,
 ) -> tuple[Path | None, Path | None]:
     """Export the UTC days of [start_utc, end_utc_inclusive] of one symbol from ``source``.
 
@@ -564,6 +604,22 @@ def export_range(
     appended. Otherwise the committed files stay as they were and
     :class:`ReexportError` is raised.
 
+    ``recheck`` names committed days of the range to build again from the
+    source in the same run as the uncommitted days (a cache dir is required).
+    A rechecked day is replaced, with a commit record with ``"reexport":
+    true``, only when the source commits it, the rebuilt day has ticks, the
+    scale sentry passes it and its CSV differs from the stored day files.
+    Otherwise its files and the manifests stay as they were.
+
+    ``outcomes`` (when given) receives each settled day's outcome:
+    ``committed``, ``committed_empty``, ``reexported``, ``unchanged`` and
+    ``no_ticks`` (a rechecked day left as it was), ``excluded``, ``left``,
+    ``rejected_scale_sentry`` or ``write_failed``. ``before_change`` (when
+    given) is called with the day before a day's files are written and before
+    an exclusion record is appended. With ``refetch`` the source fetches its
+    units from the provider, not from a staged or kept copy
+    (:attr:`~tradedesk_marketdata.source.RunContext.refetch`).
+
     With a ``cache_dir`` and a floor for the symbol (:func:`read_floor`), the
     days before the floor are dropped from the range: they are not planned,
     fetched, committed or written to the range CSVs. A range wholly before the
@@ -590,6 +646,7 @@ def export_range(
         timeout=timeout,
         retries=retries,
         keep_raw=keep_raw,
+        refetch=refetch,
     )
 
     days: list[date] = []
@@ -609,6 +666,13 @@ def export_range(
         days = [d for d in days if d >= floor]
         if not days:
             return (None, None)
+    recheck_set: set[date] = set()
+    if recheck:
+        if cache_dir is None or reexport:
+            raise ReexportError("a recheck needs a cache dir and cannot be combined with re-export")
+        recheck_set = {
+            d for d in days if d in set(recheck) and _day_is_committed(cache_dir, symbol, d)
+        }
     if reexport:
         if cache_dir is None or len(days) != 1:
             raise ReexportError("a re-export needs a cache dir and a range of exactly one day")
@@ -619,7 +683,11 @@ def export_range(
         already: set[date] = set()
     else:
         already = {
-            d for d in days if cache_dir is not None and _day_is_committed(cache_dir, symbol, d)
+            d
+            for d in days
+            if d not in recheck_set
+            and cache_dir is not None
+            and _day_is_committed(cache_dir, symbol, d)
         }
     pending = [d for d in days if d not in already]
 
@@ -630,7 +698,11 @@ def export_range(
     already_excluded: set[date] = set()
     if cache_dir is not None and pending and not reexport:
         recorded = _recorded_exclusions(cache_dir, symbol, source.name)
-        already_excluded = {d for d in pending if d in recorded and run.excludes(d) is not None}
+        already_excluded = {
+            d
+            for d in pending
+            if d not in recheck_set and d in recorded and run.excludes(d) is not None
+        }
         if already_excluded:
             log.info(
                 f"{symbol}: {len(already_excluded)} day(s) recorded as excluded by "
@@ -706,9 +778,14 @@ def export_range(
             "excluded",
             "rejected_scale_sentry",
             "left_uncommitted",
+            "unchanged",
         ),
         0,
     )
+
+    def outcome(day: date, what: str) -> None:
+        if outcomes is not None:
+            outcomes[day] = what
 
     def settle(day: date, decision: Decision) -> None:
         """Act on a final decision for one day: leave it, or commit it and record it."""
@@ -716,19 +793,25 @@ def export_range(
         bid_frames = day_bid.pop(day, [])
         ask_frames = day_ask.pop(day, [])
         dropped = day_dropped.pop(day, [])
-        if reexport and not isinstance(decision, Commit):
-            # A re-export never records an exclusion over a committed day.
+        rebuild = reexport or day in recheck_set
+        if rebuild and not isinstance(decision, Commit):
+            # A re-export or recheck never records an exclusion over a committed day.
             reexport_failure.append(f"the source did not commit it: {decision.reason}")
+            outcome(day, "left")
             advance(cache_task)
             return
         if isinstance(decision, Leave):
             counts["left_uncommitted"] += 1
+            outcome(day, "left")
             advance(cache_task)
             log.debug(f"{symbol}: {day.isoformat()} left uncommitted ({decision.reason})")
             return
         if isinstance(decision, Exclude):
             counts["excluded"] += 1
+            outcome(day, "excluded")
             advance(cache_task)
+            if before_change is not None:
+                before_change(day)
             _append_excluded_record(
                 cache_dir,
                 symbol,
@@ -742,15 +825,36 @@ def export_range(
         assert isinstance(decision, Commit)
         bid_df = _assemble_day(bid_frames)
         ask_df = _assemble_day(ask_frames)
-        outcome = _commit_day(cache_dir, symbol, day, bid_df, ask_df)
+        if day in recheck_set:
+            kept = None
+            if bid_df.empty and ask_df.empty:
+                kept = "no_ticks"
+            elif _day_unchanged(cache_dir, symbol, day, bid_df, ask_df):
+                kept = "unchanged"
+            if kept is not None:
+                counts["unchanged"] += 1
+                outcome(day, kept)
+                advance(cache_task)
+                log.debug(f"{symbol}: {day.isoformat()} rechecked, left as it was ({kept})")
+                return
+        result = _commit_day(
+            cache_dir,
+            symbol,
+            day,
+            bid_df,
+            ask_df,
+            before_write=None if before_change is None else lambda: before_change(day),
+        )
         advance(cache_task)
-        if outcome == "scale_rejected":
+        if result == "scale_rejected":
             counts["rejected_scale_sentry"] += 1
+            outcome(day, "rejected_scale_sentry")
             reexport_failure.append("the scale sentry refused it")
             return
-        if outcome != "committed":
+        if result != "committed":
             counts["left_uncommitted"] += 1
-            if outcome == "restore_failed":
+            outcome(day, "write_failed")
+            if result == "restore_failed":
                 reexport_failure.append("its day files could not be written nor restored")
                 files_unchanged[0] = False
             else:
@@ -760,6 +864,7 @@ def export_range(
         counts["committed"] += 1
         if empty:
             counts["committed_empty"] += 1
+        outcome(day, "reexported" if rebuild else "committed_empty" if empty else "committed")
         prov = run.committed(day, empty=empty)
         _append_source_manifest(
             cache_dir,
@@ -769,14 +874,14 @@ def export_range(
             scale_factor=prov.scale_factor,
             source_unit=prov.source_unit,
             dropped_ticks=dropped,
-            reexport=reexport,
+            reexport=rebuild,
         )
         if dropped:
             log.info(
                 f"{symbol}: {day.isoformat()} committed without {len(dropped)} bad tick "
                 "price(s); listed in _sources.jsonl"
             )
-        if reexport:
+        if rebuild:
             log.info(f"{symbol}: {day.isoformat()} re-exported over its earlier commit")
         if decision.partial is not None:
             counts["committed_partial"] += 1
@@ -902,6 +1007,10 @@ def export_range(
             f"rejected_scale_sentry={counts['rejected_scale_sentry']}, "
             f"left_uncommitted={counts['left_uncommitted']}"
         )
+        if recheck_set:
+            log.info(
+                f"{symbol}: rechecked={len(recheck_set)}, left_as_they_were={counts['unchanged']}"
+            )
 
     if resample_rule is None:
         return (None, None)
