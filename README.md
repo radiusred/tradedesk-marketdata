@@ -719,6 +719,16 @@ symbol in the store that the HistData symbol map holds):
    `--connect-timeout`, `--read-timeout` and `--retries` options apply to both
    sources. Without `--fallback-source`, no Dukascopy request is made.
 
+**Raw units (`--keep-raw`).** By default each source deletes its fetched raw
+units once every day they feed is committed. With `--keep-raw`, the primary
+source and the fallback move them to `{cache}/{SYMBOL}/_raw/{source}/` instead,
+as `tradedesk-md-export --keep-raw` does (see
+[Keeping the raw units](#keeping-the-raw-units---keep-raw)). A unit kept there,
+by an export or by an earlier refresh, is not deleted or moved by a refresh
+without the option: a re-fetched copy of that unit is deleted, and the kept one
+stays as it is. The one exception is the same as for an export: a kept unit
+that no longer decodes is fetched again. The report's `keep_raw` field records how the run was made.
+
 **Backups.** A run that may change the store needs `--backup-dir`, outside the
 store; without one it is refused before any request. Each run writes under
 `{backup-dir}/{YYYYMMDDTHHMMSSZ}/{SYMBOL}/`, in the store's layout: before the
@@ -737,7 +747,7 @@ fetch.
 | Field | Meaning |
 |-------|---------|
 | `since`, `until` | the window |
-| `dry_run`, `primary_source`, `fallback_source` | how the run was made |
+| `dry_run`, `primary_source`, `fallback_source`, `keep_raw` | how the run was made |
 | `backup_dir` | this run's backup directory (`null` in a dry run) |
 | `changed` | `true` when any symbol's `_sources.jsonl` changed |
 | `skipped_symbols` | store symbols not refreshed, with the reason |
@@ -769,6 +779,7 @@ Example (synthetic: the symbol `TESTSYM` and its days are made up):
   "dry_run": false,
   "primary_source": "histdata",
   "fallback_source": "dukascopy",
+  "keep_raw": false,
   "backup_dir": "/path/to/backups/20150125T060000Z",
   "changed": true,
   "symbols": [
