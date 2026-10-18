@@ -622,6 +622,7 @@ def test_report_schema_and_sources_digests(monkeypatch, store, symbol_map, tmp_p
         "dry_run",
         "primary_source",
         "fallback_source",
+        "keep_raw",
         "backup_dir",
         "changed",
         "symbols",
@@ -661,3 +662,128 @@ def test_a_run_with_no_change_says_so(monkeypatch, store, symbol_map, tmp_path, 
     assert rc == 0
     assert report["changed"] is False and sym(report)["changed"] is False
     assert "tradedesk-md-refresh: no change:" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# M25-R1..R3: --keep-raw
+# ---------------------------------------------------------------------------
+
+
+# A month file is retired once every day it feeds is committed: January's feeds 2015-01-01 to
+# 2015-02-01, so the window runs to 02-01 and the ticks run past it.
+JAN1, FEB6 = date(2015, 1, 1), date(2015, 2, 6)
+MONTH = ("--since", "2015-01-01", "--until", "2015-02-01")
+
+
+def staged_jan(store: Path) -> bool:
+    return hd._zip_path(store, SYMBOL, (2015, 1)).exists()
+
+
+def raw_files(store: Path, source: str) -> dict[str, str]:
+    root = store / SYMBOL / "_raw" / source
+    return tree_digest(root) if root.exists() else {}
+
+
+def test_keep_raw_keeps_the_primary_month_file(monkeypatch, store, symbol_map, tmp_path):
+    install_histdata(monkeypatch, ticks(JAN1, FEB6))
+    seed(store, symbol_map, JAN1, JAN9)
+    assert not (store / SYMBOL / "_raw").exists()
+
+    rc, report = run(store, symbol_map, tmp_path, *MONTH, "--keep-raw")
+
+    assert rc == 0 and sym(report)["added"]
+    assert report["keep_raw"] is True
+    assert list(raw_files(store, "histdata")) == ["201501.zip"]
+    assert not staged_jan(store)  # moved, not copied
+
+
+def test_keep_raw_keeps_the_fallback_units(monkeypatch, store, symbol_map, tmp_path):
+    install_histdata(monkeypatch, ticks(JAN5, JAN23, without=(JAN14,)))
+    seed(store, symbol_map, JAN5, JAN23)
+    dukascopy_feed(monkeypatch, ticks(JAN14, JAN14))
+
+    rc, report = run(
+        store,
+        symbol_map,
+        tmp_path,
+        "--since",
+        "2015-01-05",
+        "--until",
+        "2015-01-23",
+        "--fallback-source",
+        "dukascopy",
+        "--price-divisor",
+        "TESTSYM=10",
+        "--keep-raw",
+    )
+
+    assert rc == 0
+    assert sym(report)["reexported"] == [{"day": "2015-01-14", "source": "dukascopy"}]
+    kept = raw_files(store, "dukascopy")
+    # Dukascopy's months are zero-based: January is 00.
+    assert sorted(kept) == [f"2015/00/14/{h:02d}h_ticks.bi5" for h in range(24)]
+
+
+def test_without_keep_raw_no_raw_unit_is_kept(monkeypatch, store, symbol_map, tmp_path):
+    install_histdata(monkeypatch, ticks(JAN1, FEB6, without=(JAN14,)))
+    seed(store, symbol_map, JAN1, JAN16)
+    dukascopy_feed(monkeypatch, ticks(JAN14, JAN14))
+
+    rc, report = run(
+        store,
+        symbol_map,
+        tmp_path,
+        *MONTH,
+        "--fallback-source",
+        "dukascopy",
+        "--price-divisor",
+        "TESTSYM=10",
+    )
+
+    assert rc == 0 and report["keep_raw"] is False
+    s = sym(report)
+    assert s["added"] and s["reexported"] == [{"day": "2015-01-14", "source": "dukascopy"}]
+    assert not (store / SYMBOL / "_raw").exists()
+    assert not staged_jan(store)  # deleted, as before
+
+
+@pytest.mark.parametrize("first_run", ["refresh", "export"])
+def test_a_kept_unit_survives_a_later_refresh_without_keep_raw(
+    monkeypatch, store, symbol_map, tmp_path, first_run
+):
+    install_histdata(monkeypatch, ticks(JAN1, FEB6, without=(JAN14,)))
+    if first_run == "refresh":
+        seed(store, symbol_map, JAN1, JAN9)
+        rc, _ = run(store, symbol_map, tmp_path, *MONTH, "--keep-raw")
+        assert rc == 0
+    else:  # tradedesk-md-export --keep-raw
+        export_range(
+            source=hd.HistDataSource({"symbol_map": symbol_map}),
+            symbol=SYMBOL,
+            start_utc=datetime(2015, 1, 1, tzinfo=UTC),
+            end_utc_inclusive=datetime(2015, 2, 1, tzinfo=UTC),
+            out=store / "_out",
+            resample_rule=None,
+            cache_dir=store,
+            keep_raw=True,
+        )
+    kept = raw_files(store, "histdata")
+    assert list(kept) == ["201501.zip"]
+    assert rows(store, JAN14) == 0
+    fetcher = install_histdata(monkeypatch, ticks(JAN1, FEB6))  # HistData corrected JAN14
+
+    rc, report = run(store, symbol_map, tmp_path, *MONTH)
+
+    assert rc == 0 and report["keep_raw"] is False
+    assert fetcher.calls == [(2015, 1)]  # the month was fetched again and its days committed
+    assert sym(report)["reexported"] == [{"day": "2015-01-14", "source": "histdata"}]
+    assert raw_files(store, "histdata") == kept  # not deleted, not moved, not replaced
+    assert not staged_jan(store)  # the fresh copy was deleted, as a run without the option does
+
+
+def test_keep_raw_is_in_the_help_text(capsys):
+    with pytest.raises(SystemExit):
+        refresh_cli.main(["--help"])
+    out = " ".join(capsys.readouterr().out.split())
+    assert "--keep-raw" in out
+    assert "{cache}/{SYMBOL}/_raw/{source}/" in out

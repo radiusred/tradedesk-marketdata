@@ -29,6 +29,11 @@ store's layout (:class:`Backup`). A dry run makes no request and writes
 nothing; its report lists the days the run would add, recheck and send to the
 fallback.
 
+With ``options.keep_raw`` every export of the run, primary and fallback, keeps
+its raw units under ``{cache}/{SYMBOL}/_raw/{source}/``; without it they are
+deleted once their days are committed. A unit already under ``_raw/`` is never
+deleted by a run without it.
+
 The report (:meth:`RefreshReport.as_json`) is documented in the README.
 """
 
@@ -251,6 +256,7 @@ class RefreshReport:
     primary_source: str
     fallback_source: str | None
     backup_dir: Path | None
+    keep_raw: bool = False
     symbols: list[SymbolRefresh] = field(default_factory=list)
     skipped_symbols: dict[str, str] = field(default_factory=dict)
 
@@ -272,6 +278,7 @@ class RefreshReport:
             "dry_run": self.dry_run,
             "primary_source": self.primary_source,
             "fallback_source": self.fallback_source,
+            "keep_raw": self.keep_raw,
             "backup_dir": str(self.backup_dir.absolute()) if self.backup_dir else None,
             "changed": self.changed,
             "symbols": [s.as_json(self.dry_run) for s in self.symbols],
@@ -313,6 +320,9 @@ class RefreshOptions:
     retries: int = DEFAULT_RETRIES
     commit_partial_after_days: int = 7
     bad_tick_rule: BadTickRule | None = BadTickRule()
+    #: Move each source's raw units to ``{cache}/{SYMBOL}/_raw/{source}/`` after
+    #: their days are committed, as ``tradedesk-md-export --keep-raw`` does.
+    keep_raw: bool = False
 
 
 def _is_closure(day: date, closures: Collection[tuple[int, int]]) -> bool:
@@ -358,6 +368,7 @@ def refresh(
         primary_source=primary.name,
         fallback_source=fallback_name if fallback is not None else None,
         backup_dir=backup.run_dir if backup is not None else None,
+        keep_raw=options.keep_raw,
     )
     for symbol in symbols:
         sr = SymbolRefresh(symbol=symbol)
@@ -519,6 +530,7 @@ def _export(
             outcomes=outcomes,
             before_change=before_change,
             refetch=refetch,
+            keep_raw=options.keep_raw,
         )
 
 

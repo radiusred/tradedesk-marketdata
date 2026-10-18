@@ -3,7 +3,7 @@
 Usage::
 
     tradedesk-md-refresh --cache-dir ./cache --since YYYY-MM-DD --backup-dir ./backups \\
-        [--symbols SYMBOL ...] [--report report.json] [--dry-run] \\
+        [--symbols SYMBOL ...] [--report report.json] [--dry-run] [--keep-raw] \\
         [--fallback-source NAME --price-divisor SYMBOL=N ... [--fallback-only days.txt]]
 
 The primary source and the fallback sources come from the source registry
@@ -149,6 +149,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="report the days the run would add, recheck and send to the fallback; "
         "make no request and write nothing",
+    )
+    p.add_argument(
+        "--keep-raw",
+        action="store_true",
+        help="keep each fetched raw unit, of the primary source and the fallback, under "
+        "{cache}/{SYMBOL}/_raw/{source}/ after its days are committed, as tradedesk-md-export "
+        "--keep-raw does (default: delete it); a run without it does not delete the units kept "
+        "there",
     )
     p.add_argument(
         "--closure",
@@ -324,6 +332,7 @@ def main(argv: list[str] | None = None) -> int:
                 retries=args.retries,
                 commit_partial_after_days=args.commit_partial_after_days,
                 bad_tick_rule=bad_tick_rule,
+                keep_raw=args.keep_raw,
             ),
         )
     except (RefreshError, FloorError) as e:
