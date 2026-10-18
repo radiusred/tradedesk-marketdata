@@ -459,6 +459,47 @@ def test_a_kept_hour_is_read_instead_of_fetched(monkeypatch, tmp_path):
     assert kept.read_bytes() == b"kept"  # a kept unit is never deleted
 
 
+def test_a_kept_hour_that_does_not_decode_is_kept_and_fetched_into_staging(monkeypatch, tmp_path):
+    import lzma
+
+    cache_dir = tmp_path / "cache"
+    start = datetime(2025, 3, 1, 0, 0, tzinfo=UTC)
+    kept = cache_dir / "EURUSD" / "_raw" / "dukascopy" / "2025" / "02" / "01" / "00h_ticks.bi5"
+    kept.parent.mkdir(parents=True)
+    kept.write_bytes(b"corrupt")
+    monkeypatch.setattr(dk, "_iter_hours", lambda *_: iter([start]))
+    monkeypatch.setattr(dk, "DOWNLOAD_THREADS_PER_INSTRUMENT", 1)
+    _patch_download_and_decode(monkeypatch)
+    staged: list[Path | None] = []
+
+    def fake_download(url, *, cache_path, **kwargs):
+        staged.append(cache_path)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(b"fresh")
+        return b"fresh"
+
+    def fake_decode(hour_start, comp, *, price_format, price_divisor):
+        if comp == b"corrupt":
+            raise lzma.LZMAError("corrupt input data")
+        return [_make_tick(hour_start)]
+
+    monkeypatch.setattr(dk, "_download_bi5", fake_download)
+    monkeypatch.setattr(dk, "_decode_ticks", fake_decode)
+
+    dk.export_range(
+        symbol="EURUSD",
+        start_utc=start,
+        end_utc_inclusive=start,
+        out=tmp_path / "out",
+        resample_rule=None,
+        cache_dir=cache_dir,
+    )
+
+    assert staged == [dk._bi5_path(cache_dir, "EURUSD", start)]  # the retry goes to staging
+    assert ex._day_is_committed(cache_dir, "EURUSD", start.date())
+    assert kept.read_bytes() == b"corrupt"  # a kept unit is never deleted
+
+
 # ---------------------------------------------------------------------------
 # Helpers for test setup
 # ---------------------------------------------------------------------------
