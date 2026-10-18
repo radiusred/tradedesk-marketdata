@@ -636,14 +636,15 @@ class _DukascopyRun(SourceRun):
         try:
             ticks = _decode_ticks(hour, raw, price_format=fmt, price_divisor=self.price_divisor)
         except lzma.LZMAError:
-            # A corrupt file (truncated download, bad staging write): fetch it once more.
-            for suspect in (self._staged(hour), self.ctx.kept_raw(_bi5_relpath(hour))):
-                if suspect is not None and suspect.exists():
-                    try:
-                        log.warning(f"{self.symbol}: deleting suspect cache file: {suspect}")
-                        suspect.unlink()
-                    except OSError:
-                        log.error(f"{self.symbol}: rm failed: suspect cache file: {suspect}")
+            # A corrupt file (truncated download, bad staging write): fetch it once more,
+            # into staging. A kept unit stays where --keep-raw put it.
+            suspect = self._staged(hour)
+            if suspect is not None and suspect.exists():
+                try:
+                    log.warning(f"{self.symbol}: deleting suspect cache file: {suspect}")
+                    suspect.unlink()
+                except OSError:
+                    log.error(f"{self.symbol}: rm failed: suspect cache file: {suspect}")
 
             raw2 = _download_bi5(
                 url,

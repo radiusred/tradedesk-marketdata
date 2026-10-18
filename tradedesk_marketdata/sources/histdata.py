@@ -743,7 +743,8 @@ class _HistDataRun(SourceRun):
                 log.warning(
                     f"{self.symbol}: cached {raw.cached} is corrupt ({e}); fetching it again"
                 )
-                raw.cached.unlink(missing_ok=True)
+                if raw.cached == self._staged(ym):  # a kept unit stays where --keep-raw put it
+                    raw.cached.unlink(missing_ok=True)
                 raw = self._download(ym)
         if isinstance(raw, _Failed):
             log.warning(f"{self.symbol}: skipping HistData month {ym[0]}-{ym[1]:02d}: {raw.error}")

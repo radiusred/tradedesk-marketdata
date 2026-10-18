@@ -371,6 +371,19 @@ def test_a_kept_month_zip_is_read_instead_of_fetched(jan_2015, tmp_path):
     assert (cache / SYMBOL / "_raw" / "histdata" / "201501.zip").exists()
 
 
+def test_a_kept_month_zip_that_does_not_decode_is_kept_and_fetched_into_staging(jan_2015, tmp_path):
+    cache = tmp_path / "cache"
+    kept = cache / SYMBOL / "_raw" / "histdata" / "201501.zip"
+    kept.parent.mkdir(parents=True)
+    kept.write_bytes(b"PK\x03\x04 truncated")
+
+    _run(cache, date(2015, 1, 5), date(2015, 1, 9))
+
+    assert jan_2015.calls == [(2015, 1)]
+    assert all(_committed(cache, d) for d in _days(date(2015, 1, 5), date(2015, 1, 9)))
+    assert kept.read_bytes() == b"PK\x03\x04 truncated"  # a kept unit is never deleted
+
+
 # ---------------------------------------------------------------------------
 # Cancellation
 # ---------------------------------------------------------------------------
