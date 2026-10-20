@@ -330,6 +330,13 @@ def test_an_unstated_frequency_with_one_dated_row_is_refused():
         r.parse(_one_dated_row(body, b"Series ID,"), CONFIGS["rba"])
 
 
+def test_an_even_count_of_steps_takes_the_mean_of_the_middle_two():
+    # Steps 1 and 30, on opposite sides of the 4-day limit: the median is 15.5, not 1.
+    body = b"observation_date,SYNTHRATE\n2024-01-01,1\n2024-01-02,1\n2024-02-01,1\n"
+    with pytest.raises(r.RatesError, match=r"median 15\.5 days apart"):
+        r.parse(body, CONFIGS["fred"])
+
+
 def test_a_daily_series_with_a_long_weekend_is_accepted():
     # Thu 2024-03-28, then Tue 2024-04-02 (Good Friday and Easter Monday closed): steps 5 and 1.
     body = b"observation_date,SYNTHRATE\n2024-03-28,1\n2024-04-02,1\n2024-04-03,1\n"
