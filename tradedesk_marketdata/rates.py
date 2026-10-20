@@ -211,7 +211,8 @@ class Format:
     name: str
     version: int
     url: Callable[[SeriesConfig], str]
-    parse: Callable[[bytes, SeriesConfig], dict[date, Row]]
+    #: The dated rows, and True when the download states a daily frequency for them.
+    parse: Callable[[bytes, SeriesConfig], tuple[dict[date, Row], bool]]
     check_key: Callable[[SeriesConfig], None]
 
 
@@ -266,7 +267,7 @@ def _fred_url(cfg: SeriesConfig) -> str:
     return url
 
 
-def _fred_parse(body: bytes, cfg: SeriesConfig) -> dict[date, Row]:
+def _fred_parse(body: bytes, cfg: SeriesConfig) -> tuple[dict[date, Row], bool]:
     lines = list(csv.reader(io.StringIO(_text(body))))
     if not lines or len(lines[0]) != 2 or lines[0][0].strip() not in ("observation_date", "DATE"):
         raise RatesError("fred: the header is not 'observation_date,<series>'")
@@ -281,7 +282,7 @@ def _fred_parse(body: bytes, cfg: SeriesConfig) -> dict[date, Row]:
             raise RatesError(f"{where}: {len(line)} fields, not 2")
         d = _date(line[0], "%Y-%m-%d", where)
         _put(rows, d, Row(_value(line[1], where), None, None), where)
-    return rows
+    return rows, False
 
 
 # ECB Data Portal: service/data/{flow}/{series key}?format=csvdata, one row per
@@ -301,7 +302,7 @@ def _ecb_check(cfg: SeriesConfig) -> None:
     _split_key(cfg, "flow", "series key")
 
 
-def _ecb_parse(body: bytes, cfg: SeriesConfig) -> dict[date, Row]:
+def _ecb_parse(body: bytes, cfg: SeriesConfig) -> tuple[dict[date, Row], bool]:
     flow, series = _split_key(cfg, "flow", "series key")
     reader = csv.DictReader(io.StringIO(_text(body)))
     need = {"KEY", "FREQ", "TIME_PERIOD", "OBS_VALUE"}
@@ -318,7 +319,7 @@ def _ecb_parse(body: bytes, cfg: SeriesConfig) -> dict[date, Row]:
         value = None if rec.get("OBS_STATUS") == "M" else _value(rec["OBS_VALUE"], where)
         unit = (rec.get("UNIT_MEASURE") or "").strip() or None
         _put(rows, d, Row(value, unit, None), where)
-    return rows
+    return rows, True
 
 
 # Bank of England database (IADB): _iadb-fromshowcolumns.asp CSV, header "DATE,<CODE>",
@@ -334,7 +335,7 @@ def _boe_url(cfg: SeriesConfig) -> str:
     )
 
 
-def _boe_parse(body: bytes, cfg: SeriesConfig) -> dict[date, Row]:
+def _boe_parse(body: bytes, cfg: SeriesConfig) -> tuple[dict[date, Row], bool]:
     lines = list(csv.reader(io.StringIO(_text(body))))
     if not lines or len(lines[0]) != 2 or lines[0][0].strip() != "DATE":
         raise RatesError("boe: the header is not 'DATE,<series code>'")
@@ -349,7 +350,7 @@ def _boe_parse(body: bytes, cfg: SeriesConfig) -> dict[date, Row]:
             raise RatesError(f"{where}: {len(line)} fields, not 2")
         d = _date(line[0], "%d %b %Y", where)
         _put(rows, d, Row(_value(line[1], where), None, None), where)
-    return rows
+    return rows, False
 
 
 # Bank of Japan time-series data search API: getDataCode?format=csv&lang=en, a
@@ -372,7 +373,7 @@ def _boj_check(cfg: SeriesConfig) -> None:
     _split_key(cfg, "database", "series code")
 
 
-def _boj_parse(body: bytes, cfg: SeriesConfig) -> dict[date, Row]:
+def _boj_parse(body: bytes, cfg: SeriesConfig) -> tuple[dict[date, Row], bool]:
     _, code = _split_key(cfg, "database", "series code")
     lines = list(csv.reader(io.StringIO(_text(body))))
     header_at = next((i for i, ln in enumerate(lines) if ln and ln[0] == "SERIES_CODE"), None)
@@ -404,7 +405,7 @@ def _boj_parse(body: bytes, cfg: SeriesConfig) -> dict[date, Row]:
         published = _date(line[col["LAST_UPDATE"]], "%Y%m%d", where).isoformat()
         unit = line[col["UNIT"]].strip() or None
         _put(rows, d, Row(_value(line[col["VALUES"]], where), unit, published), where)
-    return rows
+    return rows, True
 
 
 # Reserve Bank of Australia statistical tables: tables/csv/{table}-data.csv, a title
@@ -422,7 +423,7 @@ def _rba_check(cfg: SeriesConfig) -> None:
     _split_key(cfg, "table", "series ID")
 
 
-def _rba_parse(body: bytes, cfg: SeriesConfig) -> dict[date, Row]:
+def _rba_parse(body: bytes, cfg: SeriesConfig) -> tuple[dict[date, Row], bool]:
     _, series = _split_key(cfg, "table", "series ID")
     lines = list(csv.reader(io.StringIO(_text(body))))
     meta: dict[str, list[str]] = {}
@@ -461,7 +462,7 @@ def _rba_parse(body: bytes, cfg: SeriesConfig) -> dict[date, Row]:
         d = _date(line[0], "%d-%b-%Y", where)
         value = _value(line[c], where) if c < len(line) else None
         _put(rows, d, Row(value, unit, published), where)
-    return rows
+    return rows, frequency is not None
 
 
 FORMATS: dict[str, Format] = {
@@ -479,7 +480,7 @@ DAILY_MAX_MEDIAN_STEP = 4
 
 
 def _check_daily(rows: dict[date, Row], source: str) -> None:
-    """Refuse rows whose dates are not a daily series (FRED and BoE state no frequency)."""
+    """Refuse rows whose dates are not a daily series, for a download that states no frequency."""
     days = sorted(rows)
     if len(days) < 2:
         raise RatesError(
@@ -496,13 +497,15 @@ def _check_daily(rows: dict[date, Row], source: str) -> None:
 def parse(body: bytes, cfg: SeriesConfig) -> dict[date, Row]:
     """The dated rows of one download. Raises :class:`RatesError` when it does not parse.
 
-    Every format's rows must also be daily by their dates (:func:`_check_daily`), so a
-    format that states no frequency cannot let a weekly or monthly series in.
+    A download that states no daily frequency must be daily by its dates
+    (:func:`_check_daily`), so it cannot let a weekly or monthly series in. One that
+    states a daily frequency is daily, even with one dated row.
     """
-    rows = FORMATS[cfg.source].parse(body, cfg)
+    rows, daily_stated = FORMATS[cfg.source].parse(body, cfg)
     if not any(r.value is not None for r in rows.values()):
         raise RatesError(f"{cfg.source}: the download holds no value")
-    _check_daily(rows, cfg.source)
+    if not daily_stated:
+        _check_daily(rows, cfg.source)
     return rows
 
 
