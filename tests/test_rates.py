@@ -308,6 +308,28 @@ def test_an_rba_column_without_a_frequency_row_is_judged_by_its_dates():
     assert r.parse(body, CONFIGS["rba"]) == r.parse(fixture("rba"), CONFIGS["rba"])
 
 
+def _one_dated_row(body: bytes, header: bytes) -> bytes:
+    """The download with only its second data row (the first has no value) after ``header``."""
+    head, _, rest = body.partition(header)
+    lines = rest.splitlines(keepends=True)
+    return head + header + lines[0] + lines[2]
+
+
+@pytest.mark.parametrize(
+    "fmt, header",
+    [("ecb", b"KEY,FREQ,"), ("boj", b"SERIES_CODE,"), ("rba", b"Series ID,")],
+)
+def test_a_stated_daily_series_with_one_dated_row_is_accepted(fmt, header):
+    rows = r.parse(_one_dated_row(fixture(fmt), header), CONFIGS[fmt])
+    assert len(rows) == 1 and next(iter(rows.values())).value is not None
+
+
+def test_an_unstated_frequency_with_one_dated_row_is_refused():
+    body = fixture("rba").replace(b"Frequency,Daily,Daily\n", b"")
+    with pytest.raises(r.RatesError, match="one dated row"):
+        r.parse(_one_dated_row(body, b"Series ID,"), CONFIGS["rba"])
+
+
 def test_a_daily_series_with_a_long_weekend_is_accepted():
     # Thu 2024-03-28, then Tue 2024-04-02 (Good Friday and Easter Monday closed): steps 5 and 1.
     body = b"observation_date,SYNTHRATE\n2024-03-28,1\n2024-04-02,1\n2024-04-03,1\n"
