@@ -1,0 +1,15 @@
+﻿S1 SYNTHETIC TEST TABLE
+Title,Synthetic A,Synthetic B
+Description,Synthetic rate A; test only,Synthetic rate B; test only
+Frequency,Daily,Daily
+Type,Original,Original
+Units,Per cent,Per cent
+
+
+Source,SYN,SYN
+Publication date,06-Jan-2024,06-Jan-2024
+Series ID,SYNTHIDA,SYNTHIDB
+01-Jan-2024,,9.9
+02-Jan-2024,4.35,9.9
+04-Jan-2024,4.35,9.9
+05-Jan-2024,4.40
