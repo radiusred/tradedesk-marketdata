@@ -857,6 +857,96 @@ matching scale.
 
 ---
 
+## Reference data: central-bank daily rate series (`tradedesk-md-rates`)
+
+`tradedesk-md-rates` fetches public central-bank daily rate series into a
+reference-data area of the store, next to the candle cache, and verifies that
+the kept raw downloads reproduce the parsed files.
+
+```bash
+tradedesk-md-rates fetch --store ./cache --config my-series.toml
+tradedesk-md-rates verify --store ./cache
+```
+
+### The series to fetch (`--config`)
+
+The package ships no list of series. You name the series in a TOML file of
+`[[series]]` tables; `tradedesk_marketdata/rates.example.toml` documents every
+key. Each table has an `id` (the series' directory name in the store), a
+`source` (the published format) and a `key` (the source's own code for the
+series):
+
+| `source` | Publisher and format | `key` |
+|---|---|---|
+| `fred` | FRED (St. Louis Fed), `fredgraph.csv` | the FRED series id |
+| `ecb` | ECB Data Portal, `format=csvdata` | `{flow}/{series key}` |
+| `boe` | Bank of England database (IADB), CSV | the series code |
+| `boj` | Bank of Japan time-series data search API, CSV | `{database}/{series code}` |
+| `rba` | RBA statistical table, CSV | `{table}/{series ID}` |
+
+Optional keys: `url` (instead of the format's default URL), `unit` (for a
+source that states none, such as `fred` and `boe`; a unit the source states
+wins, and a different `unit` is an error), `calendar` (`weekdays`, the
+default, or `all`) and `start` (the first date to ask for, where the format
+allows it). Only daily series are accepted: a download whose dates or stated
+frequency are not daily is refused.
+
+### The store layout
+
+Each series lives in `{store}/_reference/rates/{id}/`. The candle tools skip
+directories that start with `_`, so they do not see this area.
+
+| File | Content |
+|---|---|
+| `_raw/{sha256}.csv` | every downloaded body, kept unchanged under its sha256; never deleted |
+| `_fetches.jsonl` | one line per kept download: `fetched_at` (UTC), `url`, `sha256`, `bytes`, `raw` |
+| `observations.csv` | `date,value,unit,published,revised`, one row per date with a value |
+| `gaps.csv` | `date,reason`, one row per day without a value |
+| `manifest.json` | the series' configuration, the parser and its version, every fetch, and the sha256, row count and span of the two CSV files |
+
+- **`value`** is the source's decimal text, unchanged.
+- **`published`** is the publication date as the source states it, written
+  `YYYY-MM-DD` (`boj`: `LAST_UPDATE`; `rba`: the table's `Publication date`).
+  It is empty when the source states none (`fred`, `ecb`, `boe`); the fetch
+  time in `_fetches.jsonl` is then the only time on record.
+- **`revised`** is `true` when an earlier fetch held another value for the
+  date.
+- **Gaps are never filled.** `gaps.csv` lists each expected day (by
+  `calendar`) between the first and last observation that has no value, and
+  each row the source lists without a value. The reasons are
+  `missing_in_source` (the source lists the date with no value: an empty
+  cell, `.`, `NaN`, `null` or an ECB `OBS_STATUS` of `M`), `no_row` (the source
+  does not list the date) and `withdrawn` (an earlier fetch had a value, the
+  latest fetch that covers the date has none).
+- **The files are rebuilt from every fetch, in order.** A later fetch wins for
+  each date it lists. Dates outside the later fetch's span keep their earlier
+  rows.
+- **The manifest pins the series.** It holds no write time and no tool
+  version: it is a pure function of the fetches, so its sha256 changes only
+  when the series' data or configuration changes. A fetch whose body is the
+  same as the latest fetch's adds no line; with the same configuration it
+  changes no file either (`unchanged`).
+- **Nothing is written for a download that does not parse.** Before a fetch
+  writes, every earlier raw file is checked against its sha256, and the
+  series' `source` and `key` must match the stored manifest's.
+
+Only `tradedesk-md-rates` writes this area.
+
+### Verifying (`verify`)
+
+`tradedesk-md-rates verify` re-hashes each raw file against its line in
+`_fetches.jsonl`, parses the raw files again and rebuilds `observations.csv`,
+`gaps.csv` and `manifest.json`. Each must be byte for byte the same as the
+stored file. It writes nothing. Without `--series` it checks every series in
+the area. A raw file that has no fetch line is a warning, not a failure.
+
+Both commands take `--format text|json`. Exit status: `0` when every series
+fetched or verified; `1` when a series failed (a download that did not arrive
+or did not parse, a missing or changed raw file, a file the raw files do not
+reproduce); `2` on a usage error, including a configuration that is not valid.
+
+---
+
 ## Data-quality audit scripts
 
 The repository also ships four maintainer-oriented audit scripts under
