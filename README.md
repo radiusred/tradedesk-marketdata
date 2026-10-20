@@ -899,7 +899,7 @@ directories that start with `_`, so they do not see this area.
 | File | Content |
 |---|---|
 | `_raw/{sha256}.csv` | every downloaded body, kept unchanged under its sha256; never deleted |
-| `_fetches.jsonl` | one line per kept download: `fetched_at` (UTC), `url`, `sha256`, `bytes`, `raw` |
+| `_fetches.jsonl` | one line per kept download: `fetched_at` (UTC), `url`, `http_status` (the response's HTTP status), `sha256`, `bytes`, `raw` |
 | `observations.csv` | `date,value,unit,published,revised`, one row per date with a value |
 | `gaps.csv` | `date,reason`, one row per day without a value |
 | `manifest.json` | the series' configuration, the parser and its version, every fetch, and the sha256, row count and span of the two CSV files |
