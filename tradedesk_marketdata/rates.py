@@ -491,6 +491,7 @@ class Fetch:
 
     fetched_at: str
     url: str
+    http_status: int
     sha256: str
     bytes: int
     raw: str
@@ -499,6 +500,7 @@ class Fetch:
         return {
             "fetched_at": self.fetched_at,
             "url": self.url,
+            "http_status": self.http_status,
             "sha256": self.sha256,
             "bytes": self.bytes,
             "raw": self.raw,
@@ -653,7 +655,16 @@ def read_fetches(sdir: Path) -> list[Fetch]:
             continue
         try:
             d = json.loads(line)
-            out.append(Fetch(d["fetched_at"], d["url"], d["sha256"], int(d["bytes"]), d["raw"]))
+            out.append(
+                Fetch(
+                    d["fetched_at"],
+                    d["url"],
+                    int(d["http_status"]),
+                    d["sha256"],
+                    int(d["bytes"]),
+                    d["raw"],
+                )
+            )
         except (ValueError, KeyError, TypeError) as e:
             raise RatesError(f"{path} line {n}: not a fetch record ({e})") from None
     return out
@@ -697,12 +708,20 @@ def stored_config(sdir: Path) -> SeriesConfig | None:
 # Fetch
 
 
+@dataclass(frozen=True)
+class Response:
+    """One successful download: the HTTP status and the body."""
+
+    status: int
+    body: bytes
+
+
 def download(
     url: str,
     *,
     timeout: tuple[float, float] = (DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT),
     retries: int = DEFAULT_RETRIES,
-) -> bytes:
+) -> Response:
     """GET one URL with the package's backoff. Raises :class:`RatesError` after ``retries``."""
     last_exc: Exception | None = None
     delay = RETRY_BASE_DELAY
@@ -711,7 +730,7 @@ def download(
         try:
             with _SESSION.get(url, timeout=timeout) as r:
                 r.raise_for_status()
-                return r.content
+                return Response(r.status_code, r.content)
         except Exception as e:
             last_exc = e
             log.debug("rates attempt %d/%d failed for %s: %s", attempt, retries, url, e)
@@ -747,7 +766,7 @@ def fetch_series(
     store: Path,
     cfg: SeriesConfig,
     *,
-    get: Callable[[str], bytes] | None = None,
+    get: Callable[[str], Response] | None = None,
     now: Callable[[], str] = _now,
 ) -> FetchResult:
     """Download one series, keep the raw body and rebuild its parsed files and manifest.
@@ -766,14 +785,15 @@ def fetch_series(
     prior = [(f, _read_raw(sdir, f)) for f in read_fetches(sdir)]
     url = cfg.resolved_url()
     fetched_at = now()
-    body = (get or download)(url)
+    resp = (get or download)(url)
+    body = resp.body
     parse(body, cfg)
     sha = _sha(body)
 
     new = (
         None
         if prior and prior[-1][0].sha256 == sha
-        else Fetch(fetched_at, url, sha, len(body), f"{RAW}/{sha}.csv")
+        else Fetch(fetched_at, url, resp.status, sha, len(body), f"{RAW}/{sha}.csv")
     )
     fetches = prior if new is None else [*prior, (new, body)]
     built = build(cfg, fetches)
@@ -802,7 +822,7 @@ def fetch(
     store: Path,
     configs: Sequence[SeriesConfig],
     *,
-    get: Callable[[str], bytes] | None = None,
+    get: Callable[[str], Response] | None = None,
     now: Callable[[], str] = _now,
 ) -> list[FetchResult]:
     """Fetch each series in turn; a failed series is reported and the next one goes on."""

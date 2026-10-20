@@ -42,7 +42,7 @@ def clock():
 
 
 def fetch(store: Path, cfg: r.SeriesConfig, body: bytes, now=None) -> r.FetchResult:
-    return r.fetch_series(store, cfg, get=lambda url: body, now=now or clock())
+    return r.fetch_series(store, cfg, get=lambda url: r.Response(200, body), now=now or clock())
 
 
 def csv_rows(path: Path) -> list[list[str]]:
@@ -170,6 +170,7 @@ def test_fetch_writes_the_series_files(tmp_path):
     assert rec == {
         "fetched_at": "2024-01-06T12:00:00+00:00",
         "url": "https://www.rba.gov.au/statistics/tables/csv/s1-data.csv",
+        "http_status": 200,
         "sha256": sha,
         "bytes": len(body),
         "raw": f"_raw/{sha}.csv",
@@ -276,10 +277,10 @@ def test_another_series_cannot_be_written_under_the_same_id(tmp_path):
 
 
 def test_fetch_reports_a_failed_series_and_goes_on(tmp_path):
-    def get(url: str) -> bytes:
+    def get(url: str) -> r.Response:
         if "SYNTHRATE" in url:
             raise r.RatesError("synthetic outage")
-        return fixture("rba")
+        return r.Response(200, fixture("rba"))
 
     res = r.fetch(tmp_path, [CONFIGS["fred"], CONFIGS["rba"]], get=get, now=clock())
     assert [x.status for x in res] == ["failed", "updated"]
@@ -419,7 +420,7 @@ def test_cli_fetch_and_verify(tmp_path, monkeypatch, capsys):
     cfg = write(tmp_path, '[[series]]\nid = "SYN-BOJ"\nsource = "boj"\nkey = "SYN01/SYNTHCODE"\n')
     store = tmp_path / "store"
     store.mkdir()
-    monkeypatch.setattr(r, "download", lambda url, **kw: fixture("boj"))
+    monkeypatch.setattr(r, "download", lambda url, **kw: r.Response(200, fixture("boj")))
     assert rates_cli.main(["fetch", "--store", str(store), "--config", str(cfg)]) == 0
     assert "SYN-BOJ: updated: 3 observation(s), 2 gap(s), 0 revised" in capsys.readouterr().out
     assert rates_cli.main(["verify", "--store", str(store), "--format", "json"]) == 0
@@ -432,7 +433,7 @@ def test_cli_fetch_and_verify(tmp_path, monkeypatch, capsys):
 
 def test_cli_fetch_failure_exits_1(tmp_path, monkeypatch, capsys):
     cfg = write(tmp_path, '[[series]]\nid = "SYN-BOJ"\nsource = "boj"\nkey = "SYN01/SYNTHCODE"\n')
-    monkeypatch.setattr(r, "download", lambda url, **kw: b"not a boj body")
+    monkeypatch.setattr(r, "download", lambda url, **kw: r.Response(200, b"not a boj body"))
     assert (
         rates_cli.main(
             ["fetch", "--store", str(tmp_path), "--config", str(cfg), "--format", "json"]
@@ -480,3 +481,46 @@ def test_download_retries_then_refuses(monkeypatch):
     with pytest.raises(r.RatesError, match="2 failed attempt"):
         r.download("https://example.test/x", retries=2)
     assert len(calls) == 2
+
+
+def test_download_returns_the_http_status_with_the_body(monkeypatch):
+    class Ok:
+        status_code = 203
+        content = b"synthetic body"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def raise_for_status(self):
+            pass
+
+    class Session:
+        def get(self, url, timeout):
+            return Ok()
+
+    monkeypatch.setattr(r, "_SESSION", Session())
+    assert r.download("https://example.test/x") == r.Response(203, b"synthetic body")
+
+
+def test_the_fetch_record_keeps_the_http_status(tmp_path):
+    cfg = CONFIGS["rba"]
+    r.fetch_series(tmp_path, cfg, get=lambda url: r.Response(203, fixture("rba")), now=clock())
+    sdir = _sdir(tmp_path, cfg.id)
+    (rec,) = [json.loads(x) for x in (sdir / "_fetches.jsonl").read_text().splitlines()]
+    assert rec["http_status"] == 203
+    assert json.loads((sdir / "manifest.json").read_text())["fetches"][0]["http_status"] == 203
+    assert r.verify_series(tmp_path, cfg.id).findings == []
+
+
+def test_a_fetch_record_without_http_status_is_refused(tmp_path):
+    cfg = CONFIGS["rba"]
+    fetch(tmp_path, cfg, fixture("rba"))
+    path = _sdir(tmp_path, cfg.id) / "_fetches.jsonl"
+    rec = json.loads(path.read_text())
+    del rec["http_status"]
+    path.write_text(json.dumps(rec) + "\n")
+    (finding,) = r.verify_series(tmp_path, cfg.id).findings
+    assert "not a fetch record" in finding
