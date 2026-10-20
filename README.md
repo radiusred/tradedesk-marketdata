@@ -863,7 +863,10 @@ matching scale.
 reference-data area of the store, next to the candle cache, and verifies that
 the kept raw downloads reproduce the parsed files.
 
+The store directory must already exist:
+
 ```bash
+mkdir -p ./cache
 tradedesk-md-rates fetch --store ./cache --config my-series.toml
 tradedesk-md-rates verify --store ./cache
 ```
