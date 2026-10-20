@@ -1,0 +1,35 @@
+# An EXAMPLE configuration for `tradedesk-md-rates fetch --config`.
+#
+# This package ships no list of series. Copy this file, replace the example
+# tables with the series you need and pass the copy with --config.
+#
+# One [[series]] table per series:
+#
+#   id       = the series' name in the store: {store}/_reference/rates/{id}/
+#              (letters, digits, '.', '_' and '-'; required)
+#   source   = the published format (required):
+#                fred  FRED (St. Louis Fed) fredgraph.csv; key = the FRED series id
+#                ecb   ECB Data Portal csvdata;   key = "{flow}/{series key}"
+#                boe   Bank of England database;  key = the series code
+#                boj   Bank of Japan time-series API; key = "{database}/{series code}"
+#                rba   RBA statistical table;     key = "{table}/{series ID}"
+#   key      = the source's own code for the series (required; shape as above)
+#   url      = a URL to use instead of the format's default (optional)
+#   unit     = the unit, for a source that states none (fred, boe); a unit the
+#              source states wins, and a different one here is an error (optional)
+#   calendar = "weekdays" (default) or "all": the days on which a value is expected,
+#              between the first and the last observation; a day without one is
+#              listed in gaps.csv, never filled
+#   start    = YYYY-MM-DD, the first date to ask for, where the format allows it
+#              (optional; boe asks from 1950-01-01 by default)
+
+[[series]]
+id = "EXAMPLE-FRED"
+source = "fred"
+key = "EXAMPLESERIES"
+unit = "percent"
+
+[[series]]
+id = "EXAMPLE-ECB"
+source = "ecb"
+key = "EXAMPLEFLOW/B.EXAMPLE.KEY"
