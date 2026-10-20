@@ -473,11 +473,36 @@ FORMATS: dict[str, Format] = {
 }
 
 
+#: The largest median step, in days, between the dated rows of a daily download: a
+#: weekend plus a one-day holiday. A weekly series steps 7 days, a monthly one 28 to 31.
+DAILY_MAX_MEDIAN_STEP = 4
+
+
+def _check_daily(rows: dict[date, Row], source: str) -> None:
+    """Refuse rows whose dates are not a daily series (FRED and BoE state no frequency)."""
+    days = sorted(rows)
+    if len(days) < 2:
+        raise RatesError(
+            f"{source}: one dated row does not show a daily series; set an earlier start"
+        )
+    steps = sorted((b - a).days for a, b in zip(days, days[1:], strict=False))
+    median = steps[(len(steps) - 1) // 2]
+    if median > DAILY_MAX_MEDIAN_STEP:
+        raise RatesError(
+            f"{source}: the dates are a median {median} days apart, so the series is not daily"
+        )
+
+
 def parse(body: bytes, cfg: SeriesConfig) -> dict[date, Row]:
-    """The dated rows of one download. Raises :class:`RatesError` when it does not parse."""
+    """The dated rows of one download. Raises :class:`RatesError` when it does not parse.
+
+    Every format's rows must also be daily by their dates (:func:`_check_daily`), so a
+    format that states no frequency cannot let a weekly or monthly series in.
+    """
     rows = FORMATS[cfg.source].parse(body, cfg)
     if not any(r.value is not None for r in rows.values()):
         raise RatesError(f"{cfg.source}: the download holds no value")
+    _check_daily(rows, cfg.source)
     return rows
 
 

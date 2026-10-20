@@ -889,7 +889,11 @@ source that states none, such as `fred` and `boe`; a unit the source states
 wins, and a different `unit` is an error), `calendar` (`weekdays`, the
 default, or `all`) and `start` (the first date to ask for, where the format
 allows it). Only daily series are accepted: a download whose dates or stated
-frequency are not daily is refused.
+frequency are not daily is refused. A format that states no frequency (`fred`,
+`boe`, or an `rba` column without a `Frequency` row) is judged by its dates: the
+median step between dated rows must be 4 days or fewer (a weekend plus a
+holiday), and one dated row is not enough to tell. The check applies to every
+format, so a weekly or monthly series is refused before anything is written.
 
 ### The store layout
 

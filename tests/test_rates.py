@@ -269,6 +269,64 @@ def test_a_download_that_does_not_parse_writes_nothing(tmp_path):
     assert {p: p.read_bytes() for p in sdir.rglob("*") if p.is_file()} == before
 
 
+# Synthetic monthly and weekly downloads in the two formats that state no frequency.
+MONTHLY_FRED = b"observation_date,SYNTHRATE\n" + b"".join(
+    f"2024-{m:02d}-01,{m}.5\n".encode() for m in range(1, 13)
+)
+MONTHLY_BOE = b"DATE,XSYNTH1\n" + b"".join(
+    date(2024, m, 1).strftime("%d %b %Y,3.5\n").encode() for m in range(1, 13)
+)
+MONTHLY_RBA_NO_FREQUENCY = (
+    fixture("rba")
+    .replace(b"Frequency,Daily,Daily\n", b"")
+    .replace(b"02-Jan-2024", b"01-Feb-2024")
+    .replace(b"04-Jan-2024", b"01-Mar-2024")
+    .replace(b"05-Jan-2024", b"01-Apr-2024")
+)
+WEEKLY_FRED = b"observation_date,SYNTHRATE\n" + b"".join(
+    f"2024-01-{d:02d},1.25\n".encode() for d in (5, 12, 19, 26)
+)
+
+
+@pytest.mark.parametrize(
+    "fmt, body, message",
+    [
+        ("fred", MONTHLY_FRED, r"median 3\d days apart"),
+        ("boe", MONTHLY_BOE, r"median 3\d days apart"),
+        ("fred", WEEKLY_FRED, "median 7 days apart"),
+        ("fred", b"observation_date,SYNTHRATE\n2024-01-02,1.25\n", "one dated row"),
+        ("rba", MONTHLY_RBA_NO_FREQUENCY, r"median 3\d days apart"),
+    ],
+)
+def test_a_series_whose_dates_are_not_daily_is_refused(fmt, body, message):
+    with pytest.raises(r.RatesError, match=message):
+        r.parse(body, CONFIGS[fmt])
+
+
+def test_an_rba_column_without_a_frequency_row_is_judged_by_its_dates():
+    body = fixture("rba").replace(b"Frequency,Daily,Daily\n", b"")
+    assert r.parse(body, CONFIGS["rba"]) == r.parse(fixture("rba"), CONFIGS["rba"])
+
+
+def test_a_daily_series_with_a_long_weekend_is_accepted():
+    # Thu 2024-03-28, then Tue 2024-04-02 (Good Friday and Easter Monday closed): steps 5 and 1.
+    body = b"observation_date,SYNTHRATE\n2024-03-28,1\n2024-04-02,1\n2024-04-03,1\n"
+    assert len(r.parse(body, CONFIGS["fred"])) == 3
+
+
+@pytest.mark.parametrize("fmt, body", [("fred", MONTHLY_FRED), ("boe", MONTHLY_BOE)])
+def test_a_monthly_download_writes_nothing(tmp_path, fmt, body):
+    res = r.fetch(tmp_path, [CONFIGS[fmt]], get=lambda url: r.Response(200, body), now=clock())
+    assert res[0].status == "failed" and "not daily" in res[0].error
+    assert not (tmp_path / "_reference").exists()
+    fetch(tmp_path, CONFIGS[fmt], fixture(fmt))
+    sdir = tmp_path / "_reference/rates" / CONFIGS[fmt].id
+    before = {p: p.read_bytes() for p in sdir.rglob("*") if p.is_file()}
+    with pytest.raises(r.RatesError, match="not daily"):
+        fetch(tmp_path, CONFIGS[fmt], body)
+    assert {p: p.read_bytes() for p in sdir.rglob("*") if p.is_file()} == before
+
+
 def test_another_series_cannot_be_written_under_the_same_id(tmp_path):
     fetch(tmp_path, CONFIGS["fred"], fixture("fred"))
     other = r.SeriesConfig("SYN-FRED", "fred", "OTHERRATE", unit="percent")
