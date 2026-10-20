@@ -38,6 +38,7 @@ import json
 import logging
 import os
 import re
+import statistics
 import tempfile
 import tomllib
 from collections.abc import Callable, Sequence
@@ -486,11 +487,10 @@ def _check_daily(rows: dict[date, Row], source: str) -> None:
         raise RatesError(
             f"{source}: one dated row does not show a daily series; set an earlier start"
         )
-    steps = sorted((b - a).days for a, b in zip(days, days[1:], strict=False))
-    median = steps[(len(steps) - 1) // 2]
+    median = statistics.median((b - a).days for a, b in zip(days, days[1:], strict=False))
     if median > DAILY_MAX_MEDIAN_STEP:
         raise RatesError(
-            f"{source}: the dates are a median {median} days apart, so the series is not daily"
+            f"{source}: the dates are a median {median:g} days apart, so the series is not daily"
         )
 
 
