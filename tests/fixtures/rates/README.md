@@ -1,0 +1,13 @@
+# Synthetic rate-series fixtures
+
+Every file here is **synthetic test data**. Each one has the shape of a
+public source's published format (FRED, ECB Data Portal, Bank of England
+database, Bank of Japan time-series API, RBA statistical table), but the
+series codes (`SYNTH...`) and every value are made up. They are not real
+publications and they name no real series.
+
+Each covers 2024-01-01 (Mon) to 2024-01-05 (Fri) and has, by design:
+
+- 2024-01-01: no value in the source (missing marker, or an absent row),
+- 2024-01-03: no row at all (except where noted),
+- values on 2024-01-02, 2024-01-04 and 2024-01-05.
