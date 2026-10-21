@@ -695,3 +695,19 @@ def test_download_refuses_with_a_dividends_error(monkeypatch):
     monkeypatch.setattr(rates, "download", fail)
     with pytest.raises(dv.DividendsError, match="2 failed attempt"):
         dv.download("https://example.test/x", retries=2)
+
+
+def test_a_file_url_input_is_kept_with_no_http_status(tmp_path):
+    # rates.download reads a file: URL with no HTTP status (M29-R2); the fetch line keeps null.
+    path = tmp_path / "synthetic_generic.csv"
+    path.write_bytes(fixture("synthetic_generic.csv"))
+    assert dv.download(path.as_uri()).status is None
+    inp = dv.InputConfig("csv", url=path.as_uri(), options=GENERIC.options)
+    cfg = dv.SeriesConfig("SYN-CSV-FILE", "points", (("points", inp),), unit="index points")
+    store = tmp_path / "store"
+    assert dv.fetch_series(store, cfg, now=clock()).status == "updated"
+    (rec,) = [
+        json.loads(x) for x in (sdir(store, cfg.id) / "_fetches.jsonl").read_text().splitlines()
+    ]
+    assert rec["url"] == path.as_uri() and rec["http_status"] is None
+    assert dv.verify_series(store, cfg.id).findings == []
