@@ -5,7 +5,8 @@ TOML file, see ``rates.example.toml``); this module ships no series list. Each
 series lives in ``{store}/_reference/rates/{id}/``:
 
 - ``_raw/{sha256}.{ext}``: every downloaded body, content-addressed, with the
-  format's extension (``csv``, ``xls`` or ``xlsx``). Never changed or deleted.
+  format's extension (``csv``, ``json``, ``xls`` or ``xlsx``). Never changed or
+  deleted.
 - ``_fetches.jsonl``: one line per kept download: ``fetched_at`` (UTC),
   ``url``, ``sha256``, ``bytes``, ``raw`` (the path under the series
   directory).
@@ -799,6 +800,252 @@ def _rbnz_parse(body: bytes, cfg: SeriesConfig) -> tuple[dict[date, Row], bool]:
     return rows, False
 
 
+def _json(body: bytes, source: str) -> Any:
+    """A JSON download, with every number kept as its source text."""
+    text = _text(body)
+    if not text.strip():
+        raise RatesError(f"{source}: the download is empty (the series may not exist)")
+    try:
+        return json.loads(text, parse_float=str, parse_int=str)
+    except json.JSONDecodeError as e:
+        raise RatesError(f"{source}: the download is not JSON ({e})") from None
+
+
+def _json_value(v: Any, where: str) -> str | None:
+    if v is None:
+        return None
+    if not isinstance(v, str):
+        raise RatesError(f"{where}: value {v!r} is not a decimal number")
+    return _value(v, where)
+
+
+def _json_records(data: Any, source: str) -> list[dict[str, Any]]:
+    if not isinstance(data, list) or not all(isinstance(x, dict) for x in data):
+        raise RatesError(f"{source}: the download is not a list of observations")
+    return data
+
+
+def _plain_key_check(cfg: SeriesConfig) -> None:
+    if not _ID.match(cfg.key):
+        raise RatesError(f"{cfg.id}: a {cfg.source} key is a series id matching {_ID.pattern}")
+
+
+# Swiss National Bank data portal: api/cube/{cube}/data/csv/en?dimSel=D0(item),...,
+# semicolon-separated and quoted: "CubeId";cube, "PublishingDate";"YYYY-MM-DD HH:MM", a
+# blank line, then "Date";<one column per dimension>;"Value". An empty Value is no value.
+
+_SNB_SELECTION = re.compile(r"^(D\d+)\(([^(),]+)\)$")
+
+
+def _snb_key(cfg: SeriesConfig) -> tuple[str, dict[str, str]]:
+    cube, sel = _split_key(cfg, "cube", "dimension selection")
+    dims: dict[str, str] = {}
+    for part in sel.split(","):
+        m = _SNB_SELECTION.match(part)
+        if not m or m.group(1) in dims:
+            raise RatesError(
+                f"{cfg.id}: an snb dimension selection is 'D0(item)' or 'D0(item),D1(item)', "
+                f"one item per dimension, not {sel!r}"
+            )
+        dims[m.group(1)] = m.group(2)
+    return cube, dims
+
+
+def _snb_url(cfg: SeriesConfig) -> str:
+    cube, sel = _split_key(cfg, "cube", "dimension selection")
+    url = f"https://data.snb.ch/api/cube/{quote(cube)}/data/csv/en?dimSel={quote(sel, safe='(),')}"
+    if cfg.start:
+        url += f"&fromDate={cfg.start.isoformat()}"
+    return url
+
+
+def _snb_check(cfg: SeriesConfig) -> None:
+    _snb_key(cfg)
+
+
+def _snb_parse(body: bytes, cfg: SeriesConfig) -> tuple[dict[date, Row], bool]:
+    cube, dims = _snb_key(cfg)
+    lines = list(csv.reader(io.StringIO(_text(body)), delimiter=";"))
+    header_at = next((i for i, ln in enumerate(lines) if ln and ln[0] == "Date"), None)
+    if header_at is None:
+        raise RatesError("snb: no 'Date' header")
+    pre = {ln[0]: ln[1:] for ln in lines[:header_at] if ln}
+    if pre.get("CubeId", [""])[0] != cube:
+        raise RatesError(f"snb: the cube is {pre.get('CubeId')!r}, not {cube!r}")
+    pub_text = (pre.get("PublishingDate") or [""])[0].strip()
+    published = None
+    if pub_text:
+        published = _date(pub_text[:10], "%Y-%m-%d", "snb PublishingDate").isoformat()
+    header = lines[header_at]
+    if header[-1] != "Value" or sorted(header[1:-1]) != sorted(dims):
+        raise RatesError(
+            f"snb: the header is {';'.join(header)!r}, not Date;{';'.join(sorted(dims))};Value"
+        )
+    want = [dims[c] for c in header[1:-1]]
+    rows: dict[date, Row] = {}
+    for n, line in enumerate(lines[header_at + 1 :], header_at + 2):
+        if not line:
+            continue
+        where = f"snb line {n}"
+        if len(line) != len(header):
+            raise RatesError(f"{where}: {len(line)} fields, not {len(header)}")
+        if line[1:-1] != want:
+            raise RatesError(f"{where}: items {line[1:-1]!r}, not {want!r}")
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", line[0].strip()):
+            raise RatesError(
+                f"snb series {cfg.key!r}: date {line[0].strip()!r} is not a day (YYYY-MM-DD), "
+                "so the series is not daily"
+            )
+        d = _date(line[0], "%Y-%m-%d", where)
+        _put(rows, d, Row(_value(line[-1], where), None, published), where)
+    return rows, False
+
+
+# Bank of Canada Valet API: valet/observations/{series}/json, {"seriesDetail": {series:
+# {"dimension": {"key": "d"}, "dateFormat": "daily", "metadata": {"unit": ...}}},
+# "observations": [{"d": "YYYY-MM-DD", series: {"v": "text"}}]}.
+
+
+def _boc_url(cfg: SeriesConfig) -> str:
+    url = f"https://www.bankofcanada.ca/valet/observations/{quote(cfg.key)}/json"
+    if cfg.start:
+        url += f"?start_date={cfg.start.isoformat()}"
+    return url
+
+
+def _boc_parse(body: bytes, cfg: SeriesConfig) -> tuple[dict[date, Row], bool]:
+    data = _json(body, "boc")
+    if not isinstance(data, dict) or not isinstance(data.get("observations"), list):
+        raise RatesError("boc: the download has no observations list")
+    detail = (data.get("seriesDetail") or {}).get(cfg.key)
+    if not isinstance(detail, dict):
+        raise RatesError(f"boc: the download has no seriesDetail for {cfg.key!r}")
+    date_format = detail.get("dateFormat")
+    if date_format is not None and date_format != "daily":
+        raise RatesError(f"boc series {cfg.key!r}: dateFormat {date_format!r} is not daily")
+    dim = (detail.get("dimension") or {}).get("key") or "d"
+    unit = ((detail.get("metadata") or {}).get("unit") or "").strip() or None
+    rows: dict[date, Row] = {}
+    for n, obs in enumerate(data["observations"], 1):
+        where = f"boc observation {n}"
+        if not isinstance(obs, dict) or not isinstance(obs.get(dim), str):
+            raise RatesError(f"{where}: no {dim!r} date")
+        d = _date(obs[dim], "%Y-%m-%d", where)
+        cell = obs.get(cfg.key)
+        if cell is not None and not isinstance(cell, dict):
+            raise RatesError(f"{where}: {cfg.key!r} is not an object")
+        value = _json_value((cell or {}).get("v"), where)
+        _put(rows, d, Row(value, unit, None), where)
+    return rows, date_format == "daily"
+
+
+# Sveriges Riksbank SWEA API: swea/v1/Observations/{series}/{from}, a JSON list of
+# {"date": "YYYY-MM-DD", "value": number}; an unknown series answers 204 with no body.
+
+
+def _swea_url(cfg: SeriesConfig) -> str:
+    start = (cfg.start or date(1900, 1, 1)).isoformat()
+    return f"https://api.riksbank.se/swea/v1/Observations/{quote(cfg.key)}/{start}"
+
+
+def _swea_parse(body: bytes, cfg: SeriesConfig) -> tuple[dict[date, Row], bool]:
+    rows: dict[date, Row] = {}
+    for n, rec in enumerate(_json_records(_json(body, "swea"), "swea"), 1):
+        where = f"swea observation {n}"
+        if not isinstance(rec.get("date"), str):
+            raise RatesError(f"{where}: no date")
+        d = _date(rec["date"], "%Y-%m-%d", where)
+        _put(rows, d, Row(_json_value(rec.get("value"), where), None, None), where)
+    return rows, False
+
+
+# Sveriges Riksbank SWESTR API: swestr/v1/all/{id}?fromDate=YYYY-MM-DD, a JSON list of
+# {"rate": number, "date": "YYYY-MM-DD", "publicationTime": ISO 8601 UTC, ...}.
+
+
+def _swestr_url(cfg: SeriesConfig) -> str:
+    start = (cfg.start or date(1900, 1, 1)).isoformat()
+    return f"https://api.riksbank.se/swestr/v1/all/{quote(cfg.key)}?fromDate={start}"
+
+
+def _swestr_parse(body: bytes, cfg: SeriesConfig) -> tuple[dict[date, Row], bool]:
+    rows: dict[date, Row] = {}
+    for n, rec in enumerate(_json_records(_json(body, "swestr"), "swestr"), 1):
+        where = f"swestr observation {n}"
+        if not isinstance(rec.get("date"), str):
+            raise RatesError(f"{where}: no date")
+        d = _date(rec["date"], "%Y-%m-%d", where)
+        published = None
+        if rec.get("publicationTime") is not None:
+            try:
+                stamp = datetime.fromisoformat(rec["publicationTime"])
+            except (TypeError, ValueError):
+                raise RatesError(
+                    f"{where}: publicationTime {rec['publicationTime']!r} is not ISO 8601"
+                ) from None
+            if stamp.tzinfo is not None:
+                stamp = stamp.astimezone(UTC)
+            published = stamp.date().isoformat()
+        _put(rows, d, Row(_json_value(rec.get("rate"), where), None, published), where)
+    return rows, False
+
+
+# Norges Bank SDMX data API: api/data/{flow}/{series key}?format=csv&locale=en,
+# semicolon-separated, the dimension codes first (each followed by its label), then
+# attributes, TIME_PERIOD and OBS_VALUE. FREQ "B" (business) or "D" is daily.
+
+_SDMX_CODE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+def _norges_key(cfg: SeriesConfig) -> tuple[str, list[str]]:
+    flow, series = _split_key(cfg, "flow", "series key")
+    parts = series.split(".")
+    if any(not p or "+" in p for p in parts):
+        raise RatesError(f"{cfg.id}: a norges series key names one series, not {series!r}")
+    return flow, parts
+
+
+def _norges_url(cfg: SeriesConfig) -> str:
+    flow, series = _split_key(cfg, "flow", "series key")
+    url = f"https://data.norges-bank.no/api/data/{quote(flow)}/{quote(series)}?format=csv&locale=en"
+    if cfg.start:
+        url += f"&startPeriod={cfg.start.isoformat()}"
+    return url
+
+
+def _norges_check(cfg: SeriesConfig) -> None:
+    _norges_key(cfg)
+
+
+def _norges_parse(body: bytes, cfg: SeriesConfig) -> tuple[dict[date, Row], bool]:
+    _, parts = _norges_key(cfg)
+    reader = csv.DictReader(io.StringIO(_text(body)), delimiter=";")
+    need = {"FREQ", "TIME_PERIOD", "OBS_VALUE"}
+    if reader.fieldnames is None or not need <= set(reader.fieldnames):
+        raise RatesError(f"norges: the header lacks {', '.join(sorted(need))}")
+    codes = [c for c in reader.fieldnames if _SDMX_CODE.match(c)]
+    dims = codes[: len(parts)]
+    if len(dims) < len(parts) or reader.fieldnames.index(dims[-1]) > reader.fieldnames.index(
+        "TIME_PERIOD"
+    ):
+        raise RatesError(f"norges: the header has fewer than {len(parts)} dimension columns")
+    rows: dict[date, Row] = {}
+    for n, rec in enumerate(reader, 2):
+        where = f"norges line {n}"
+        if rec["FREQ"] not in ("B", "D"):
+            raise RatesError(
+                f"norges series {cfg.key!r}: frequency {rec['FREQ']!r} is not daily (B or D)"
+            )
+        got = [rec[c] for c in dims]
+        if got != parts:
+            raise RatesError(f"{where}: series {'.'.join(got)!r}, not {'.'.join(parts)!r}")
+        d = _date(rec["TIME_PERIOD"], "%Y-%m-%d", where)
+        value = None if rec.get("OBS_STATUS") == "M" else _value(rec["OBS_VALUE"] or "", where)
+        unit = (rec.get("UNIT_MEASURE") or "").strip() or None
+        _put(rows, d, Row(value, unit, None), where)
+    return rows, True
+
+
 FORMATS: dict[str, Format] = {
     "fred": Format("fred", 1, _fred_url, _fred_parse, _no_key_check),
     "ecb": Format("ecb", 1, _ecb_url, _ecb_parse, _ecb_check),
@@ -807,6 +1054,11 @@ FORMATS: dict[str, Format] = {
     "rba": Format("rba", 1, _rba_url, _rba_parse, _rba_check),
     "rba-xls": Format("rba-xls", 1, _rba_xls_url, _rba_xls_parse, _rba_xls_check, "xls"),
     "rbnz": Format("rbnz", 1, _rbnz_url, _rbnz_parse, _rbnz_check, "xlsx"),
+    "snb": Format("snb", 1, _snb_url, _snb_parse, _snb_check),
+    "boc": Format("boc", 1, _boc_url, _boc_parse, _plain_key_check, "json"),
+    "swea": Format("swea", 1, _swea_url, _swea_parse, _plain_key_check, "json"),
+    "swestr": Format("swestr", 1, _swestr_url, _swestr_parse, _plain_key_check, "json"),
+    "norges": Format("norges", 1, _norges_url, _norges_parse, _norges_check),
 }
 
 
@@ -815,17 +1067,19 @@ FORMATS: dict[str, Format] = {
 DAILY_MAX_MEDIAN_STEP = 4
 
 
-def _check_daily(rows: dict[date, Row], source: str) -> None:
+def _check_daily(rows: dict[date, Row], cfg: SeriesConfig) -> None:
     """Refuse rows whose dates are not a daily series, for a download that states no frequency."""
     days = sorted(rows)
     if len(days) < 2:
         raise RatesError(
-            f"{source}: one dated row does not show a daily series; set an earlier start"
+            f"{cfg.source} series {cfg.key!r}: one dated row does not show a daily series; "
+            "set an earlier start"
         )
     median = statistics.median((b - a).days for a, b in zip(days, days[1:], strict=False))
     if median > DAILY_MAX_MEDIAN_STEP:
         raise RatesError(
-            f"{source}: the dates are a median {median:g} days apart, so the series is not daily"
+            f"{cfg.source} series {cfg.key!r}: the dates are a median {median:g} days apart, "
+            "so the series is not daily"
         )
 
 
@@ -840,7 +1094,7 @@ def parse(body: bytes, cfg: SeriesConfig) -> dict[date, Row]:
     if not any(r.value is not None for r in rows.values()):
         raise RatesError(f"{cfg.source}: the download holds no value")
     if not daily_stated:
-        _check_daily(rows, cfg.source)
+        _check_daily(rows, cfg)
     return rows
 
 
