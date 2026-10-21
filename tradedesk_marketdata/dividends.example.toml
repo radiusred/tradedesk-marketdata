@@ -1,0 +1,78 @@
+# An EXAMPLE configuration for `tradedesk-md-dividends fetch --config`.
+#
+# This package ships no list of series. Copy this file, replace the example
+# tables with the series you need and pass the copy with --config. Read the
+# publisher's terms of use first: keep a series only where they allow it.
+#
+# One [[series]] table per series:
+#
+#   id       = the series' name in the store: {store}/_reference/dividends/{id}/
+#              (letters, digits, '.', '_' and '-'; required)
+#   kind     = (required)
+#                points   a published daily dividend-points index; one [series.input]
+#                tr_pr    the daily dividend return from a total-return level
+#                         [series.tr] and a price-return level [series.pr]:
+#                         (TR_t / TR_p) / (PR_t / PR_p) - 1, p = the previous date
+#                         on which both levels are published
+#                monthly  a monthly dividend series, a coarse fallback; one [series.input]
+#   unit     = the unit written in observations.csv (optional where the format
+#              implies one: nikkei; tr_pr defaults to "fraction")
+#   calendar = "weekdays" (default) or "all": the days on which a value is expected,
+#              between the first and the last observation (not for monthly: every
+#              month is expected); a day without one is listed in gaps.csv, never filled
+#
+# An input table ([series.input], [series.tr], [series.pr]):
+#
+#   source   = the format (required):
+#                nikkei   Nikkei Inc. index CSVs; key = one of
+#                           dividend_points  (points)
+#                           total_return, net_total_return  (tr)
+#                           price  (pr)
+#                shiller  Robert J. Shiller's ie_data.xls (monthly only); key = the
+#                         column header to read (default "D"); url is required
+#                csv      any delimited text with a header row; url is required and
+#                         the options below name the columns
+#   key      = the format's own name for the input (shape as above)
+#   url      = a URL to use instead of the format's default
+#
+# csv options: date_column, value_column (required); date_format (strptime,
+# default "%Y-%m-%d"); published_column; period_column; encoding (default
+# "utf-8-sig"); delimiter (default ","); skip_lines (lines before the header,
+# default 0); footer_prefix (rows whose first cell starts with it are skipped).
+
+[[series]]
+id = "EXAMPLE-POINTS"
+kind = "points"
+[series.input]
+source = "nikkei"
+key = "dividend_points"
+
+[[series]]
+id = "EXAMPLE-TR-PR"
+kind = "tr_pr"
+[series.tr]
+source = "nikkei"
+key = "total_return"
+[series.pr]
+source = "nikkei"
+key = "price"
+
+[[series]]
+id = "EXAMPLE-MONTHLY"
+kind = "monthly"
+unit = "example unit"
+[series.input]
+source = "shiller"
+key = "D"
+url = "https://example.invalid/ie_data.xls"
+
+[[series]]
+id = "EXAMPLE-CSV"
+kind = "points"
+unit = "index points"
+[series.input]
+source = "csv"
+url = "https://example.invalid/dividend-points.csv"
+date_column = "Date"
+value_column = "Points"
+date_format = "%d/%m/%Y"

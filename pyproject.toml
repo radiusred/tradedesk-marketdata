@@ -37,8 +37,11 @@ dev = [
     "pandas-stubs>=2.2.0",
     "pytest>=9.0",
     "pytest-cov>=7.0",
+    "xlrd>=2.0",
 ]
 parquet = ["pyarrow>=16.1"]
+# Reads .xls downloads (the shiller format of tradedesk-md-dividends).
+xls = ["xlrd>=2.0"]
 tooling = ["llm-tldr[dev]>=1.5.2"]
 
 [project.scripts]
@@ -49,6 +52,7 @@ tradedesk-md-verify = "tradedesk_marketdata.verify_cli:main"
 tradedesk-md-floor = "tradedesk_marketdata.floor_cli:main"
 tradedesk-md-refresh = "tradedesk_marketdata.refresh_cli:main"
 tradedesk-md-rates = "tradedesk_marketdata.rates_cli:main"
+tradedesk-md-dividends = "tradedesk_marketdata.dividends_cli:main"
 # The pre-2.0 command names, kept as aliases for one major version.
 tradedesk-dc-export = "tradedesk_marketdata.cli:main"
 tradedesk-dc-normalize = "tradedesk_marketdata.normalize_cli:main"
@@ -93,5 +97,5 @@ select = ["E", "F", "I", "B", "UP"]
 [tool.mypy]
 
 [[tool.mypy.overrides]]
-module = ["requests", "requests.*"]
+module = ["requests", "requests.*", "xlrd", "xlrd.*"]
 ignore_missing_imports = true
