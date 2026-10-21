@@ -886,6 +886,43 @@ series):
 | `boe` | Bank of England database (IADB), CSV | the series code |
 | `boj` | Bank of Japan time-series data search API, CSV | `{database}/{series code}` |
 | `rba` | RBA statistical table, CSV | `{table}/{series ID}` |
+| `rba-xls` | RBA statistical table, `.xls` workbook (the historical files under `tables/xls-hist/`) | `{file}/{series ID}` |
+| `rbnz` | RBNZ statistical table, `.xlsx` workbook | `{file}/{Series Id}` |
+
+The workbook formats read the publisher's table layout: `rba-xls` the same
+metadata rows as the RBA CSV (`Frequency`, `Units`, `Publication date`,
+`Series ID`) on the `Data` sheet, with date cells; `rbnz` the `Data` sheet's
+`Unit` and `Series Id` rows and the `Table Description` sheet's
+`Published Date`. The `file` part of the key is the workbook's name without
+its extension: `rba-xls` asks for
+`https://www.rba.gov.au/statistics/tables/xls-hist/{file}.xls`, and `rbnz`
+derives its URL from a file name such as `hb2-daily` (`.../statistics/series/b/b2/hb2-daily.xlsx`);
+set `url` for any other file. A `.xls` number is stored as a binary double
+with no text, so its `value` is the shortest decimal that reads back as the
+same double (`4.4`, `3`); a `.xlsx` number keeps its stored text.
+Reading `.xls` needs `xlrd`, which is optional:
+`pip install 'tradedesk-marketdata[xls]'` (the `rbnz` `.xlsx` reader needs
+nothing more).
+A workbook is one whole file, so for `rba-xls` and `rbnz` the `start` key
+drops the rows dated before it: they are not read, and they are not gaps. A
+cell that is not a decimal number (for example a range such as `1.00 to
+1.50`) refuses the series, with its line; a `start` after that row lets the
+rest of the column in.
+
+**A local file.** `url` may be a `file:` URL, for a publisher that refuses
+scripted downloads (the RBNZ site does from some networks). Download the
+workbook in a browser and name it in the configuration:
+
+```toml
+[[series]]
+id = "EXAMPLE-RBNZ"
+source = "rbnz"
+key = "hb2-daily/EXAMPLE.SERIES"
+url = "file:///home/me/downloads/hb2-daily.xlsx"
+```
+
+The fetch keeps the file as a raw file exactly as a download, and its
+`_fetches.jsonl` line has `http_status` `null`.
 
 Optional keys: `url` (instead of the format's default URL), `unit` (for a
 source that states none, such as `fred` and `boe`; a unit the source states
@@ -893,10 +930,10 @@ wins, and a different `unit` is an error), `calendar` (`weekdays`, the
 default, or `all`) and `start` (the first date to ask for, where the format
 allows it). Only daily series are accepted: a download whose dates or stated
 frequency are not daily is refused. A format that states no frequency (`fred`,
-`boe`, or an `rba` column without a `Frequency` row) is judged by its dates: the
+`boe`, `rbnz`, or an `rba` or `rba-xls` column without a `Frequency` row) is judged by its dates: the
 median step between dated rows must be 4 days or fewer (a weekend plus a
 holiday), and one dated row is not enough to tell. A download that states a
-daily frequency (`ecb`, `boj`, or an `rba` column with `Frequency` `Daily`) is
+daily frequency (`ecb`, `boj`, or an `rba` or `rba-xls` column with `Frequency` `Daily`) is
 accepted with one dated row. A weekly or monthly series is refused before
 anything is written.
 
@@ -907,15 +944,16 @@ directories that start with `_`, so they do not see this area.
 
 | File | Content |
 |---|---|
-| `_raw/{sha256}.csv` | every downloaded body, kept unchanged under its sha256; never deleted |
-| `_fetches.jsonl` | one line per kept download: `fetched_at` (UTC), `url`, `http_status` (the response's HTTP status), `sha256`, `bytes`, `raw` |
+| `_raw/{sha256}.{ext}` | every downloaded body, kept unchanged under its sha256 with the format's extension (`csv`; `xls` for `rba-xls`; `xlsx` for `rbnz`); never deleted |
+| `_fetches.jsonl` | one line per kept download: `fetched_at` (UTC), `url`, `http_status` (the response's HTTP status; `null` for a `file:` URL), `sha256`, `bytes`, `raw` |
 | `observations.csv` | `date,value,unit,published,revised`, one row per date with a value |
 | `gaps.csv` | `date,reason`, one row per day without a value |
 | `manifest.json` | the series' configuration, the parser and its version, every fetch, and the sha256, row count and span of the two CSV files |
 
 - **`value`** is the source's decimal text, unchanged.
 - **`published`** is the publication date as the source states it, written
-  `YYYY-MM-DD` (`boj`: `LAST_UPDATE`; `rba`: the table's `Publication date`).
+  `YYYY-MM-DD` (`boj`: `LAST_UPDATE`; `rba`, `rba-xls`: the table's
+  `Publication date`; `rbnz`: the `Published Date`).
   It is empty when the source states none (`fred`, `ecb`, `boe`); the fetch
   time in `_fetches.jsonl` is then the only time on record.
 - **`revised`** is `true` when an earlier fetch held another value for the
@@ -924,7 +962,8 @@ directories that start with `_`, so they do not see this area.
   `calendar`) between the first and last observation that has no value, and
   each row the source lists without a value. The reasons are
   `missing_in_source` (the source lists the date with no value: an empty
-  cell, `.`, `NaN`, `null` or an ECB `OBS_STATUS` of `M`), `no_row` (the source
+  cell, `.`, `NaN`, `null`, a workbook error cell such as `#N/A`, or an ECB
+  `OBS_STATUS` of `M`), `no_row` (the source
   does not list the date) and `withdrawn` (an earlier fetch had a value, the
   latest fetch that covers the date has none).
 - **The files are rebuilt from every fetch, in order.** A later fetch wins for
@@ -1032,7 +1071,7 @@ Each series lives in `{store}/_reference/dividends/{id}/`, beside
 | File | Content |
 |---|---|
 | `_raw/{sha256}.{csv,xls}` | every downloaded body, kept unchanged under its sha256; never deleted |
-| `_fetches.jsonl` | one line per kept download: `fetched_at` (UTC), `url`, `http_status`, `sha256`, `bytes`, `raw`, `input` (`points`, `monthly`, `tr` or `pr`) |
+| `_fetches.jsonl` | one line per kept download: `fetched_at` (UTC), `url`, `http_status` (`null` for a `file:` URL), `sha256`, `bytes`, `raw`, `input` (`points`, `monthly`, `tr` or `pr`) |
 | `observations.csv` | `points`: `date,value,unit,period,published,revised`; `monthly`: the same and `coarse` (always `true`); `tr_pr`: `date,value,unit,span_from,published,revised` |
 | `gaps.csv` | `date,reason`, one row per expected day (or month) without a value |
 | `manifest.json` | the configuration, `frequency` (`daily` or `monthly`), `coarse`, `unit`, the parser of each input and its version, for `tr_pr` the `derivation` (formula, 12 decimal places, half-even rounding), every fetch, and the sha256, row count and span of the two CSV files |

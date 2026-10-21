@@ -13,15 +13,19 @@
 #                boe   Bank of England database;  key = the series code
 #                boj   Bank of Japan time-series API; key = "{database}/{series code}"
 #                rba   RBA statistical table;     key = "{table}/{series ID}"
+#                rba-xls  RBA statistical table, .xls workbook; key = "{file}/{series ID}"
+#                rbnz  RBNZ statistical table, .xlsx workbook; key = "{file}/{Series Id}"
 #   key      = the source's own code for the series (required; shape as above)
-#   url      = a URL to use instead of the format's default (optional)
+#   url      = a URL to use instead of the format's default (optional); a file: URL
+#              (file:///path/to/workbook.xlsx) reads a file downloaded by hand
 #   unit     = the unit, for a source that states none (fred, boe); a unit the
 #              source states wins, and a different one here is an error (optional)
 #   calendar = "weekdays" (default) or "all": the days on which a value is expected,
 #              between the first and the last observation; a day without one is
 #              listed in gaps.csv, never filled
 #   start    = YYYY-MM-DD, the first date to ask for, where the format allows it
-#              (optional; boe asks from 1950-01-01 by default)
+#              (optional; boe asks from 1950-01-01 by default; rba-xls and rbnz
+#              read the whole workbook and drop the rows dated before start)
 
 [[series]]
 id = "EXAMPLE-FRED"
