@@ -1,0 +1,43 @@
+{
+    "terms": {
+        "url": "https://example.invalid/terms/"
+    },
+    "seriesDetail": {
+        "SYNTHSERIES": {
+            "label": "Synthetic rate, test only",
+            "description": "Synthetic test data; not a real series.",
+            "dimension": {
+                "key": "d",
+                "name": "Date"
+            },
+            "dateFormat": "daily",
+            "metadata": {
+                "unit": "Percent",
+                "frequency": "Business daily"
+            }
+        }
+    },
+    "observations": [
+        {
+            "d": "2024-01-01"
+        },
+        {
+            "d": "2024-01-02",
+            "SYNTHSERIES": {
+                "v": "2.75"
+            }
+        },
+        {
+            "d": "2024-01-04",
+            "SYNTHSERIES": {
+                "v": "2.7500"
+            }
+        },
+        {
+            "d": "2024-01-05",
+            "SYNTHSERIES": {
+                "v": "2.80"
+            }
+        }
+    ]
+}
