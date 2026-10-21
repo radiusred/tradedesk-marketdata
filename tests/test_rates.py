@@ -1,4 +1,4 @@
-"""tradedesk-md-rates (M27-R1): central-bank daily rate series in the reference-data area.
+"""tradedesk-md-rates (M27-R1, M29-R1): central-bank daily rate series in the reference-data area.
 
 Every fixture is labelled synthetic data (``tests/fixtures/rates/README.md``): the shapes
 of the public formats with made-up series codes and values. Downloads are stubbed; no test
@@ -7,6 +7,7 @@ makes a network request.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 from datetime import date
@@ -27,13 +28,18 @@ CONFIGS = {
     "boe": r.SeriesConfig("SYN-BOE", "boe", "XSYNTH1", unit="percent"),
     "boj": r.SeriesConfig("SYN-BOJ", "boj", "SYN01/SYNTHCODE"),
     "rba": r.SeriesConfig("SYN-RBA", "rba", "s1/SYNTHIDA"),
+    "snb": r.SeriesConfig("SYN-SNB", "snb", "synthcube/D0(SYNTH1)", unit="percent"),
+    "boc": r.SeriesConfig("SYN-BOC", "boc", "SYNTHSERIES"),
+    "swea": r.SeriesConfig("SYN-SWEA", "swea", "SYNTHSWEA", unit="percent"),
+    "swestr": r.SeriesConfig("SYN-SWESTR", "swestr", "SYNTHSWESTR", unit="percent"),
+    "norges": r.SeriesConfig("SYN-NORGES", "norges", "SYN/B.SYNTH.SD.R"),
 }
 
 D1, D2, D3, D4, D5 = (date(2024, 1, d) for d in range(1, 6))
 
 
 def fixture(fmt: str) -> bytes:
-    return (FIXTURES / f"synthetic_{fmt}.csv").read_bytes()
+    return (FIXTURES / f"synthetic_{fmt}.{r.FORMATS[fmt].ext}").read_bytes()
 
 
 def clock():
@@ -61,6 +67,10 @@ def csv_rows(path: Path) -> list[list[str]]:
         ("boe", None, None),
         ("boj", "percent per annum", "2024-01-06"),
         ("rba", "Per cent", "2024-01-06"),
+        ("snb", None, "2024-01-06"),
+        ("boc", "Percent", None),
+        ("swea", None, None),
+        ("norges", "R", None),
     ],
 )
 def test_each_format_parses_its_synthetic_fixture(fmt, unit, published):
@@ -79,6 +89,39 @@ def test_values_are_kept_as_the_source_text():
     assert rows[D4].value == "3.5125"
     rows = r.parse(fixture("fred"), CONFIGS["fred"])
     assert rows[D4].value == "1.30"  # not 1.3
+    rows = r.parse(fixture("boc"), CONFIGS["boc"])
+    assert rows[D4].value == "2.7500"
+
+
+def test_json_numbers_are_kept_as_the_source_text():
+    rows = r.parse(fixture("swea"), CONFIGS["swea"])
+    assert [rows[d].value for d in (D2, D4, D5)] == ["3", "3.25", "3.250"]
+    rows = r.parse(fixture("swestr"), CONFIGS["swestr"])
+    assert [rows[d].value for d in (D2, D4, D5)] == ["1.111", "1.120", "1.125"]
+
+
+def test_swestr_takes_each_day_s_publication_date():
+    rows = r.parse(fixture("swestr"), CONFIGS["swestr"])
+    assert rows[D1].value is None and D3 not in rows
+    assert [rows[d].published for d in (D1, D2, D4, D5)] == [
+        "2024-01-02",
+        "2024-01-03",
+        "2024-01-05",
+        "2024-01-08",
+    ]
+
+
+def test_snb_reads_a_selection_of_two_dimensions():
+    body = (
+        b'"CubeId";"synthcube"\n"PublishingDate";"2024-01-06 09:00"\n\n'
+        b'"Date";"D0";"D1";"Value"\n'
+        b'"2024-01-02";"SYNTH1";"SYNTHB";"0.5"\n"2024-01-03";"SYNTH1";"SYNTHB";"0.5"\n'
+    )
+    cfg = r.SeriesConfig("SYN-SNB2", "snb", "synthcube/D1(SYNTHB),D0(SYNTH1)", unit="percent")
+    assert sorted(r.parse(body, cfg)) == [D2, D3]
+    other = body.replace(b'"SYNTHB";"0.5"\n"2024-01-03"', b'"OTHER";"0.5"\n"2024-01-03"')
+    with pytest.raises(r.RatesError, match="items"):
+        r.parse(other, cfg)
 
 
 def test_rba_picks_the_column_by_series_id_and_a_short_row_has_no_value():
@@ -105,6 +148,28 @@ def test_rba_picks_the_column_by_series_id_and_a_short_row_has_no_value():
         ("rba", fixture("rba").replace(b"SYNTHIDA", b"OTHERID"), "not in the table"),
         ("rba", fixture("rba").replace(b"Frequency,Daily", b"Frequency,Monthly"), "Monthly"),
         ("rba", b"\xff\xfe\x00", "not UTF-8"),
+        ("snb", fixture("snb").replace(b'"synthcube"', b'"othercube"'), "not 'synthcube'"),
+        ("snb", fixture("snb").replace(b'"SYNTH1";"0.5"', b'"OTHER";"0.5"'), "items"),
+        ("snb", b'{"code":"404","message":"Table not found"}', "no 'Date' header"),
+        ("snb", fixture("snb").replace(b'"D0";"Value"', b'"D1";"Value"'), "header"),
+        ("boc", b'{"message": "Series not found."}', "no observations"),
+        (
+            "boc",
+            fixture("boc").replace(b'"SYNTHSERIES": {\n            "label"', b'"X": {"label"'),
+            "no seriesDetail",
+        ),
+        ("boc", fixture("boc").replace(b'"v": "2.80"', b'"v": "n/a"'), "not a decimal"),
+        ("boc", b"<html>error</html>", "not JSON"),
+        ("swea", b"", "empty"),
+        ("swea", b'{"statusCode": 429}', "not a list"),
+        ("swea", b'[{"date":"2024-01-02","value":true}]', "not a decimal"),
+        ("swestr", fixture("swestr").replace(b'"2024-01-03T08:00:00Z"', b'"soon"'), "ISO 8601"),
+        (
+            "norges",
+            fixture("norges").replace(b"B;Business;SYNTH", b"B;Business;OTHER", 1),
+            "not 'B.SYNTH.SD.R'",
+        ),
+        ("norges", b"<?xml version='1.0'?><message:Error/>", "header lacks"),
     ],
 )
 def test_a_download_that_does_not_parse_is_refused(fmt, body, message):
@@ -126,6 +191,17 @@ def test_a_download_that_does_not_parse_is_refused(fmt, body, message):
             "?format=csv&lang=en&db=SYN01&code=SYNTHCODE",
         ),
         (CONFIGS["rba"], "https://www.rba.gov.au/statistics/tables/csv/s1-data.csv"),
+        (CONFIGS["snb"], "https://data.snb.ch/api/cube/synthcube/data/csv/en?dimSel=D0(SYNTH1)"),
+        (CONFIGS["boc"], "https://www.bankofcanada.ca/valet/observations/SYNTHSERIES/json"),
+        (CONFIGS["swea"], "https://api.riksbank.se/swea/v1/Observations/SYNTHSWEA/1900-01-01"),
+        (
+            CONFIGS["swestr"],
+            "https://api.riksbank.se/swestr/v1/all/SYNTHSWESTR?fromDate=1900-01-01",
+        ),
+        (
+            CONFIGS["norges"],
+            "https://data.norges-bank.no/api/data/SYN/B.SYNTH.SD.R?format=csv&locale=en",
+        ),
         (
             r.SeriesConfig("X", "fred", "K", url="https://example.test/x.csv"),
             "https://example.test/x.csv",
@@ -134,6 +210,41 @@ def test_a_download_that_does_not_parse_is_refused(fmt, body, message):
 )
 def test_each_format_addresses_its_series(cfg, url):
     assert cfg.resolved_url() == url
+
+
+@pytest.mark.parametrize(
+    "fmt, part",
+    [
+        ("ecb", "&startPeriod=2024-01-01"),
+        ("snb", "&fromDate=2024-01-01"),
+        ("boc", "?start_date=2024-01-01"),
+        ("swea", "/SYNTHSWEA/2024-01-01"),
+        ("swestr", "?fromDate=2024-01-01"),
+        ("norges", "&startPeriod=2024-01-01"),
+    ],
+)
+def test_the_url_asks_from_the_configured_start(fmt, part):
+    cfg = dataclasses.replace(CONFIGS[fmt], start=date(2024, 1, 1))
+    assert part in cfg.resolved_url()
+
+
+@pytest.mark.parametrize(
+    "source, key, message",
+    [
+        ("snb", "synthcube", "'cube/dimension selection'"),
+        ("snb", "synthcube/D0(A,B)", "one item per dimension"),
+        ("snb", "synthcube/D0(A),D0(B)", "one item per dimension"),
+        ("snb", "synthcube/SYNTH1", "one item per dimension"),
+        ("norges", "SYN/B..SD.R", "names one series"),
+        ("norges", "SYN/B.SYNTH+OTHER.SD.R", "names one series"),
+        ("boc", "SYNTH/SERIES", "series id"),
+        ("swea", "SYNTH SERIES", "series id"),
+        ("swestr", "../SYNTH", "series id"),
+    ],
+)
+def test_a_key_of_the_wrong_shape_is_refused(source, key, message):
+    with pytest.raises(r.RatesError, match=message):
+        r.SeriesConfig.from_json({"id": "SYN-X", "source": source, "key": key})
 
 
 def test_boe_url_asks_from_the_configured_start():
@@ -303,6 +414,77 @@ def test_a_series_whose_dates_are_not_daily_is_refused(fmt, body, message):
         r.parse(body, CONFIGS[fmt])
 
 
+WEEKLY_SWEA = (
+    b"["
+    + b",".join(f'{{"date":"2024-01-{d:02d}","value":3}}'.encode() for d in (5, 12, 19, 26))
+    + b"]"
+)
+MONTHLY_SNB = (
+    b'"CubeId";"synthcube"\n"PublishingDate";"2024-04-02 09:00"\n\n"Date";"D0";"Value"\n'
+    b'"2024-01";"SYNTH1";"0.5"\n"2024-02";"SYNTH1";"0.5"\n"2024-03";"SYNTH1";"0.5"\n'
+)
+
+
+@pytest.mark.parametrize(
+    "fmt, body, message",
+    [
+        ("snb", MONTHLY_SNB, "date '2024-01' is not a day"),
+        (
+            "boc",
+            fixture("boc").replace(b'"dateFormat": "daily"', b'"dateFormat": "monthly"'),
+            "dateFormat 'monthly' is not daily",
+        ),
+        (
+            "norges",
+            fixture("norges").replace(b"B;Business;", b"M;Monthly;"),
+            "frequency 'M' is not daily",
+        ),
+        ("swea", WEEKLY_SWEA, "median 7 days apart"),
+        ("fred", MONTHLY_FRED, r"median 3\d days apart"),
+    ],
+)
+def test_a_source_refuses_a_non_daily_series_by_name(fmt, body, message):
+    with pytest.raises(r.RatesError, match=message) as e:
+        r.parse(body, CONFIGS[fmt])
+    assert f"{fmt} series {CONFIGS[fmt].key!r}" in str(e.value)
+
+
+def test_a_boc_series_without_a_date_format_is_judged_by_its_dates():
+    body = fixture("boc").replace(b'"dateFormat": "daily",', b"")
+    assert r.parse(body, CONFIGS["boc"]) == r.parse(fixture("boc"), CONFIGS["boc"])
+    weekly = body.replace(b'"2024-01-04"', b'"2024-01-09"')
+    weekly = weekly.replace(b'"2024-01-05"', b'"2024-01-16"')
+    with pytest.raises(r.RatesError, match="boc series 'SYNTHSERIES': .* not daily"):
+        r.parse(weekly, CONFIGS["boc"])
+
+
+@pytest.mark.parametrize(
+    "fmt, ext", [("snb", "csv"), ("norges", "csv"), ("boc", "json"), ("swea", "json")]
+)
+def test_the_raw_file_keeps_the_format_s_extension(tmp_path, fmt, ext):
+    fetch(tmp_path, CONFIGS[fmt], fixture(fmt))
+    sdir = tmp_path / "_reference/rates" / CONFIGS[fmt].id
+    (raw,) = (sdir / "_raw").iterdir()
+    assert raw.name == f"{hashlib.sha256(fixture(fmt)).hexdigest()}.{ext}"
+    (line,) = (sdir / "_fetches.jsonl").read_text().splitlines()
+    assert json.loads(line)["raw"] == f"_raw/{raw.name}"
+    assert not r.verify_series(tmp_path, CONFIGS[fmt].id).failed
+
+
+def test_a_json_source_s_gaps_and_observations(tmp_path):
+    fetch(tmp_path, CONFIGS["swestr"], fixture("swestr"))
+    sdir = tmp_path / "_reference/rates/SYN-SWESTR"
+    assert csv_rows(sdir / "observations.csv") == [
+        ["2024-01-02", "1.111", "percent", "2024-01-03", "false"],
+        ["2024-01-04", "1.120", "percent", "2024-01-05", "false"],
+        ["2024-01-05", "1.125", "percent", "2024-01-08", "false"],
+    ]
+    assert csv_rows(sdir / "gaps.csv") == [
+        ["2024-01-01", "missing_in_source"],
+        ["2024-01-03", "no_row"],
+    ]
+
+
 def test_an_rba_column_without_a_frequency_row_is_judged_by_its_dates():
     body = fixture("rba").replace(b"Frequency,Daily,Daily\n", b"")
     assert r.parse(body, CONFIGS["rba"]) == r.parse(fixture("rba"), CONFIGS["rba"])
@@ -317,7 +499,12 @@ def _one_dated_row(body: bytes, header: bytes) -> bytes:
 
 @pytest.mark.parametrize(
     "fmt, header",
-    [("ecb", b"KEY,FREQ,"), ("boj", b"SERIES_CODE,"), ("rba", b"Series ID,")],
+    [
+        ("ecb", b"KEY,FREQ,"),
+        ("boj", b"SERIES_CODE,"),
+        ("rba", b"Series ID,"),
+        ("norges", b"FREQ;"),
+    ],
 )
 def test_a_stated_daily_series_with_one_dated_row_is_accepted(fmt, header):
     rows = r.parse(_one_dated_row(fixture(fmt), header), CONFIGS[fmt])
@@ -472,7 +659,7 @@ def test_load_config_reads_the_series_tables(tmp_path):
 
 def test_the_shipped_example_configuration_loads():
     path = Path(r.__file__).parent / "rates.example.toml"
-    assert [c.id for c in r.load_config(path)] == ["EXAMPLE-FRED", "EXAMPLE-ECB"]
+    assert [c.id for c in r.load_config(path)] == ["EXAMPLE-FRED", "EXAMPLE-ECB", "EXAMPLE-SNB"]
 
 
 @pytest.mark.parametrize(
