@@ -963,7 +963,14 @@ reference-data area as the rate series, and verifies that the kept raw
 downloads reproduce the parsed files. It works like `tradedesk-md-rates`: the
 same raw files, fetch log, merge rule, manifest and `verify`.
 
+Before the first fetch, create `my-dividends.toml`. Copy
+`tradedesk_marketdata/dividends.example.toml`, keep only the series you need,
+and replace its placeholder `example.invalid` URLs with real ones (see
+[The series to fetch](#the-series-to-fetch---config-1)). Without this file,
+`fetch` exits with status 2. The store directory must already exist:
+
 ```bash
+cp tradedesk_marketdata/dividends.example.toml my-dividends.toml  # in a checkout; then edit it
 mkdir -p ./cache
 tradedesk-md-dividends fetch --store ./cache --config my-dividends.toml
 tradedesk-md-dividends verify --store ./cache
