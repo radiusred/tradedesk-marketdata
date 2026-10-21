@@ -1,5 +1,5 @@
-FREQ;Frequency;INSTRUMENT_TYPE;Instrument Type;TENOR;Tenor;UNIT_MEASURE;Unit of Measure;DECIMALS;COLLECTION;Collection Indicator;TIME_PERIOD;OBS_VALUE;CALC_METHOD;Calculation Method
-B;Business;SYNTH;Synthetic rate, test only;SD;Synthetic tenor;R;Rate;2;E;End of day;2024-01-01;;;
-B;Business;SYNTH;Synthetic rate, test only;SD;Synthetic tenor;R;Rate;2;E;End of day;2024-01-02;3.75;;
-B;Business;SYNTH;Synthetic rate, test only;SD;Synthetic tenor;R;Rate;2;E;End of day;2024-01-04;3.75;;
-B;Business;SYNTH;Synthetic rate, test only;SD;Synthetic tenor;R;Rate;2;E;End of day;2024-01-05;3.8;;
+STRUCTURE,STRUCTURE_ID,ACTION,FREQ,INSTRUMENT_TYPE,TENOR,UNIT_MEASURE,TIME_PERIOD,OBS_VALUE,DECIMALS,COLLECTION,CALC_METHOD
+dataflow,NB:SYN(1.0),I,B,SYNTH,SD,R,2024-01-01,,2,E,
+dataflow,NB:SYN(1.0),I,B,SYNTH,SD,R,2024-01-02,3.75,2,E,
+dataflow,NB:SYN(1.0),I,B,SYNTH,SD,R,2024-01-04,3.75,2,E,
+dataflow,NB:SYN(1.0),I,B,SYNTH,SD,R,2024-01-05,3.8,2,E,

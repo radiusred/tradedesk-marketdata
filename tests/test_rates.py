@@ -166,10 +166,16 @@ def test_rba_picks_the_column_by_series_id_and_a_short_row_has_no_value():
         ("swestr", fixture("swestr").replace(b'"2024-01-03T08:00:00Z"', b'"soon"'), "ISO 8601"),
         (
             "norges",
-            fixture("norges").replace(b"B;Business;SYNTH", b"B;Business;OTHER", 1),
+            fixture("norges").replace(b",I,B,SYNTH,", b",I,B,OTHER,", 1),
             "not 'B.SYNTH.SD.R'",
         ),
         ("norges", b"<?xml version='1.0'?><message:Error/>", "header lacks"),
+        (
+            "norges",
+            fixture("norges").replace(b"B,SYNTH,SD,R,2024-01-04", b"B,SYNTH,OTHER,R,2024-01-04"),
+            "series 'B.SYNTH.OTHER.R', not 'B.SYNTH.SD.R'",
+        ),
+        ("norges", fixture("norges").replace(b"NB:SYN(1.0)", b"NB:OTHER(1.0)", 1), "not flow"),
     ],
 )
 def test_a_download_that_does_not_parse_is_refused(fmt, body, message):
@@ -200,7 +206,7 @@ def test_a_download_that_does_not_parse_is_refused(fmt, body, message):
         ),
         (
             CONFIGS["norges"],
-            "https://data.norges-bank.no/api/data/SYN/B.SYNTH.SD.R?format=csv&locale=en",
+            "https://data.norges-bank.no/api/data/SYN/B.SYNTH.SD.R?format=sdmx-csv&labels=id",
         ),
         (
             r.SeriesConfig("X", "fred", "K", url="https://example.test/x.csv"),
@@ -436,7 +442,7 @@ MONTHLY_SNB = (
         ),
         (
             "norges",
-            fixture("norges").replace(b"B;Business;", b"M;Monthly;"),
+            fixture("norges").replace(b",I,B,", b",I,M,"),
             "frequency 'M' is not daily",
         ),
         ("swea", WEEKLY_SWEA, "median 7 days apart"),
@@ -447,6 +453,20 @@ def test_a_source_refuses_a_non_daily_series_by_name(fmt, body, message):
     with pytest.raises(r.RatesError, match=message) as e:
         r.parse(body, CONFIGS[fmt])
     assert f"{fmt} series {CONFIGS[fmt].key!r}" in str(e.value)
+
+
+@pytest.mark.parametrize("key", ["SYN/B.SYNTH", "SYN/B.SYNTH.SD", "SYN/B.SYNTH.SD.R.X"])
+def test_a_norges_key_must_name_every_dimension_of_the_flow(key):
+    cfg = dataclasses.replace(CONFIGS["norges"], key=key)
+    with pytest.raises(r.RatesError, match="flow 'SYN' has 4 dimensions"):
+        r.parse(fixture("norges"), cfg)
+
+
+def test_a_norges_download_that_mixes_tenors_on_distinct_dates_is_not_stored(tmp_path):
+    body = fixture("norges").replace(b"B,SYNTH,SD,R,2024-01-04", b"B,SYNTH,OTHER,R,2024-01-04")
+    with pytest.raises(r.RatesError, match="series 'B.SYNTH.OTHER.R'"):
+        fetch(tmp_path, CONFIGS["norges"], body)
+    assert not any(tmp_path.iterdir())
 
 
 def test_a_boc_series_without_a_date_format_is_judged_by_its_dates():
@@ -503,7 +523,7 @@ def _one_dated_row(body: bytes, header: bytes) -> bytes:
         ("ecb", b"KEY,FREQ,"),
         ("boj", b"SERIES_CODE,"),
         ("rba", b"Series ID,"),
-        ("norges", b"FREQ;"),
+        ("norges", b"STRUCTURE,"),
     ],
 )
 def test_a_stated_daily_series_with_one_dated_row_is_accepted(fmt, header):

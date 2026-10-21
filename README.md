@@ -892,7 +892,7 @@ series):
 | `boc` | Bank of Canada Valet API, JSON | the series name |
 | `swea` | Sveriges Riksbank SWEA API, JSON | the series id |
 | `swestr` | Sveriges Riksbank SWESTR API, JSON | the SWESTR id |
-| `norges` | Norges Bank SDMX data API, CSV | `{flow}/{series key}`, one series (no wildcard, no `+`) |
+| `norges` | Norges Bank SDMX data API, SDMX-CSV (`format=sdmx-csv&labels=id`) | `{flow}/{series key}`, one series: a code for every dimension of the flow (no wildcard, no `+`, no short key) |
 
 The workbook formats read the publisher's table layout: `rba-xls` the same
 metadata rows as the RBA CSV (`Frequency`, `Units`, `Publication date`,
