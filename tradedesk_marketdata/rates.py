@@ -990,11 +990,13 @@ def _swestr_parse(body: bytes, cfg: SeriesConfig) -> tuple[dict[date, Row], bool
     return rows, False
 
 
-# Norges Bank SDMX data API: api/data/{flow}/{series key}?format=csv&locale=en,
-# semicolon-separated, the dimension codes first (each followed by its label), then
-# attributes, TIME_PERIOD and OBS_VALUE. FREQ "B" (business) or "D" is daily.
+# Norges Bank SDMX data API: api/data/{flow}/{series key}?format=sdmx-csv&labels=id,
+# SDMX-CSV 2.0: STRUCTURE, STRUCTURE_ID ("NB:{flow}(version)"), ACTION, then the
+# flow's dimensions, TIME_PERIOD, OBS_VALUE and the attributes. The columns between
+# ACTION and TIME_PERIOD are the flow's full dimension list. The API reads a short key
+# as a wildcard, so the key must name every dimension. FREQ "B" (business) or "D" is daily.
 
-_SDMX_CODE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_SDMX_FLOW = re.compile(r"^[A-Za-z0-9_]+:([A-Za-z0-9_]+)\(")
 
 
 def _norges_key(cfg: SeriesConfig) -> tuple[str, list[str]]:
@@ -1007,7 +1009,8 @@ def _norges_key(cfg: SeriesConfig) -> tuple[str, list[str]]:
 
 def _norges_url(cfg: SeriesConfig) -> str:
     flow, series = _split_key(cfg, "flow", "series key")
-    url = f"https://data.norges-bank.no/api/data/{quote(flow)}/{quote(series)}?format=csv&locale=en"
+    url = f"https://data.norges-bank.no/api/data/{quote(flow)}/{quote(series)}"
+    url += "?format=sdmx-csv&labels=id"
     if cfg.start:
         url += f"&startPeriod={cfg.start.isoformat()}"
     return url
@@ -1018,25 +1021,29 @@ def _norges_check(cfg: SeriesConfig) -> None:
 
 
 def _norges_parse(body: bytes, cfg: SeriesConfig) -> tuple[dict[date, Row], bool]:
-    _, parts = _norges_key(cfg)
-    reader = csv.DictReader(io.StringIO(_text(body)), delimiter=";")
-    need = {"FREQ", "TIME_PERIOD", "OBS_VALUE"}
-    if reader.fieldnames is None or not need <= set(reader.fieldnames):
-        raise RatesError(f"norges: the header lacks {', '.join(sorted(need))}")
-    codes = [c for c in reader.fieldnames if _SDMX_CODE.match(c)]
-    dims = codes[: len(parts)]
-    if len(dims) < len(parts) or reader.fieldnames.index(dims[-1]) > reader.fieldnames.index(
-        "TIME_PERIOD"
-    ):
-        raise RatesError(f"norges: the header has fewer than {len(parts)} dimension columns")
+    flow, parts = _norges_key(cfg)
+    reader = csv.DictReader(io.StringIO(_text(body)))
+    head = reader.fieldnames or []
+    need = ["STRUCTURE_ID", "ACTION", "FREQ", "TIME_PERIOD", "OBS_VALUE"]
+    if not set(need) <= set(head) or head.index("ACTION") > head.index("TIME_PERIOD"):
+        raise RatesError(f"norges: the header lacks {', '.join(need)} in SDMX-CSV order")
+    dims = head[head.index("ACTION") + 1 : head.index("TIME_PERIOD")]
+    if len(dims) != len(parts):
+        raise RatesError(
+            f"norges series {cfg.key!r}: the key has {len(parts)} parts, "
+            f"flow {flow!r} has {len(dims)} dimensions ({'.'.join(dims)})"
+        )
     rows: dict[date, Row] = {}
     for n, rec in enumerate(reader, 2):
         where = f"norges line {n}"
+        m = _SDMX_FLOW.match(rec["STRUCTURE_ID"] or "")
+        if not m or m.group(1) != flow:
+            raise RatesError(f"{where}: structure {rec['STRUCTURE_ID']!r}, not flow {flow!r}")
         if rec["FREQ"] not in ("B", "D"):
             raise RatesError(
                 f"norges series {cfg.key!r}: frequency {rec['FREQ']!r} is not daily (B or D)"
             )
-        got = [rec[c] for c in dims]
+        got = [rec[c] or "" for c in dims]
         if got != parts:
             raise RatesError(f"{where}: series {'.'.join(got)!r}, not {'.'.join(parts)!r}")
         d = _date(rec["TIME_PERIOD"], "%Y-%m-%d", where)
