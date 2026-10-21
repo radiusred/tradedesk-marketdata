@@ -956,6 +956,116 @@ reproduce); `2` on a usage error, including a configuration that is not valid.
 
 ---
 
+## Reference data: index-dividend series (`tradedesk-md-dividends`)
+
+`tradedesk-md-dividends` fetches public index-dividend series into the same
+reference-data area as the rate series, and verifies that the kept raw
+downloads reproduce the parsed files. It works like `tradedesk-md-rates`: the
+same raw files, fetch log, merge rule, manifest and `verify`.
+
+```bash
+mkdir -p ./cache
+tradedesk-md-dividends fetch --store ./cache --config my-dividends.toml
+tradedesk-md-dividends verify --store ./cache
+```
+
+The `shiller` format reads `.xls` files and needs the `xls` extra:
+`pip install 'tradedesk-marketdata[xls]'`.
+
+### Terms of use
+
+Read a publisher's terms of use before you keep its data. The package ships a
+preset only for a publisher whose terms do not forbid keeping a copy, and it
+does not decide for you that your use is permitted:
+
+| Format | Publisher | Terms (read 2026-10-21) |
+|---|---|---|
+| `nikkei` | Nikkei Inc. index CSVs, daily from 2023-01-04 | [terms of use](https://indexes.nikkei.co.jp/nkave/archives/file/terms_of_use_en.pdf) (2019-08-30): use beyond "personal use" or "quotation" under copyright law needs a licence; each CSV says copying needs Nikkei's permission |
+| `shiller` | Robert J. Shiller, `ie_data.xls` from [shillerdata.com](https://shillerdata.com/), monthly from 1871 | no licence is stated; the dividend data derive from S&P data |
+| `csv` | any | yours to check |
+
+S&P Dow Jones Indices, FTSE Russell / LSEG and STOXX / DAX have no preset:
+their terms of use forbid keeping their data and scripted download. Use the
+`csv` format for such a source only with the publisher's written consent.
+
+### The series to fetch (`--config`)
+
+The package ships no list of series. You name the series in a TOML file of
+`[[series]]` tables; `tradedesk_marketdata/dividends.example.toml` documents
+every key. Each table has an `id` (the series' directory name in the store)
+and a `kind`:
+
+| `kind` | Inputs | `value` |
+|---|---|---|
+| `points` | `[series.input]`: a daily dividend-points index | the source's decimal text, unchanged |
+| `tr_pr` | `[series.tr]` and `[series.pr]`: daily total-return and price-return index levels | `(TR_t / TR_p) / (PR_t / PR_p) - 1`, where `p` is the previous date on which both levels are published |
+| `monthly` | `[series.input]`: a monthly dividend series | the source's value, unchanged; a **coarse fallback** |
+
+Each input names a `source` (the format), a `key` and, where the format has
+no default, a `url`:
+
+| `source` | `key` | Roles |
+|---|---|---|
+| `nikkei` | `dividend_points`; `total_return` or `net_total_return`; `price` | `points`; `tr`; `pr` |
+| `shiller` | the column header to read (default `D`); `url` is required | `monthly` |
+| `csv` | none; the options `date_column`, `value_column` (required), `date_format`, `published_column`, `period_column`, `encoding`, `delimiter`, `skip_lines`, `footer_prefix`; `url` is required | any |
+
+Optional series keys: `unit` (required where the format implies none;
+`nikkei` implies `index points` or `index level`, and `tr_pr` defaults to
+`fraction`) and `calendar` (`weekdays`, the default, or `all`; not for
+`monthly`, where every month is expected). A daily input must step by a day
+(a median step of 4 days or fewer). A monthly input's rows are dated the first
+of their month, and must step by a month.
+
+### The store layout
+
+Each series lives in `{store}/_reference/dividends/{id}/`, beside
+`_reference/rates/`. The candle tools skip directories that start with `_`.
+
+| File | Content |
+|---|---|
+| `_raw/{sha256}.{csv,xls}` | every downloaded body, kept unchanged under its sha256; never deleted |
+| `_fetches.jsonl` | one line per kept download: `fetched_at` (UTC), `url`, `http_status`, `sha256`, `bytes`, `raw`, `input` (`points`, `monthly`, `tr` or `pr`) |
+| `observations.csv` | `points`: `date,value,unit,period,published,revised`; `monthly`: the same and `coarse` (always `true`); `tr_pr`: `date,value,unit,span_from,published,revised` |
+| `gaps.csv` | `date,reason`, one row per expected day (or month) without a value |
+| `manifest.json` | the configuration, `frequency` (`daily` or `monthly`), `coarse`, `unit`, the parser of each input and its version, for `tr_pr` the `derivation` (formula, 12 decimal places, half-even rounding), every fetch, and the sha256, row count and span of the two CSV files |
+
+- **`period`** is the period the source states for the value, empty when it
+  states none (`nikkei` `dividend_points`: the `Year` its points accumulate
+  for).
+- **`published`** is the publication time as the source states it, unchanged,
+  empty when it states none (`nikkei`, `shiller`). For `tr_pr` it is the later
+  of the two inputs' texts.
+- **`span_from`** (`tr_pr`) is the date `p` of the previous levels. When it is
+  not the previous expected day, the days between are in `gaps.csv`.
+- **`revised`** is `true` when an earlier fetch held another value for an
+  input of the row (for `tr_pr`: either level on either date).
+- **`shiller` values** are numbers in the workbook. They are written as the
+  shortest decimal text that reads back as the same number.
+- **Gaps are never filled.** The reasons are those of the rate series
+  (`missing_in_source`, `no_row`, `withdrawn`) and, for `tr_pr`, `missing_tr`
+  and `missing_pr` (one level is published on the date, the other is not).
+  For `tr_pr`, only the days between the first and last date with both levels
+  are listed.
+
+The merge rule, the manifest, `unchanged` and "nothing is written for a
+download that does not parse" are as for the rate series. A `tr_pr` series
+downloads both inputs and parses both before it writes; an input whose body
+equals its latest fetch adds no line. The series' `kind` and inputs (all but
+their URLs) must match the stored manifest's.
+
+Only `tradedesk-md-dividends` writes this area.
+
+### Verifying (`verify`)
+
+As for the rate series: `tradedesk-md-dividends verify` re-hashes each raw
+file, rebuilds the three files and compares them byte for byte. It writes
+nothing. Both commands take `--format text|json`, and the exit status is the
+same: `0` when every series fetched or verified; `1` when a series failed; `2`
+on a usage error, including a configuration that is not valid.
+
+---
+
 ## Data-quality audit scripts
 
 The repository also ships four maintainer-oriented audit scripts under
