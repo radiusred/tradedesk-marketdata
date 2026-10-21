@@ -4,8 +4,8 @@ A series is named by the caller's configuration (``[[series]]`` tables in a
 TOML file, see ``rates.example.toml``); this module ships no series list. Each
 series lives in ``{store}/_reference/rates/{id}/``:
 
-- ``_raw/{sha256}.csv``: every downloaded body, content-addressed. Never
-  changed or deleted.
+- ``_raw/{sha256}.{ext}``: every downloaded body, content-addressed, with the
+  format's extension (``csv``, ``xls`` or ``xlsx``). Never changed or deleted.
 - ``_fetches.jsonl``: one line per kept download: ``fetched_at`` (UTC),
   ``url``, ``sha256``, ``bytes``, ``raw`` (the path under the series
   directory).
@@ -41,12 +41,16 @@ import re
 import statistics
 import tempfile
 import tomllib
+import zipfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
+from urllib.request import url2pathname
+from xml.etree import ElementTree as ET
 
 import requests
 
@@ -215,6 +219,8 @@ class Format:
     #: The dated rows, and True when the download states a daily frequency for them.
     parse: Callable[[bytes, SeriesConfig], tuple[dict[date, Row], bool]]
     check_key: Callable[[SeriesConfig], None]
+    #: The extension of the kept raw file: ``_raw/{sha256}.{ext}``.
+    ext: str = "csv"
 
 
 def _text(body: bytes) -> str:
@@ -409,10 +415,294 @@ def _boj_parse(body: bytes, cfg: SeriesConfig) -> tuple[dict[date, Row], bool]:
     return rows, True
 
 
-# Reserve Bank of Australia statistical tables: tables/csv/{table}-data.csv, a title
-# line, metadata rows (Title, Description, Frequency, Type, Units, Source,
-# Publication date, Series ID) and data rows "DD-Mon-YYYY,...". A short row has no
-# value for the columns it does not reach.
+# Spreadsheet workbooks (.xls, .xlsx): each sheet becomes a grid of cells. A cell is
+# None when it is empty.
+
+
+@dataclass(frozen=True)
+class Cell:
+    """One workbook cell (or one CSV field, as ``s``).
+
+    ``kind`` is ``s`` (text), ``n`` (a number, as decimal text), ``d`` (a date, as ISO
+    text), ``b`` (a boolean) or ``e`` (an error, such as ``#N/A``).
+    """
+
+    kind: str
+    text: str
+
+
+Grid = list[list[Cell | None]]
+
+
+@dataclass(frozen=True)
+class Workbook:
+    """The sheets of a workbook, by name, in workbook order.
+
+    ``epoch`` is the date of serial day 0 when date cells are plain numbers (``.xlsx``),
+    None when the reader gives date cells as ``d`` (``.xls``).
+    """
+
+    sheets: dict[str, Grid]
+    epoch: date | None
+
+
+def _label(cell: Cell | None) -> str:
+    return cell.text.strip() if cell is not None and cell.kind == "s" else ""
+
+
+def _float_text(x: float, where: str) -> str:
+    """A stored double as text: the shortest decimal that reads back as ``x``, positional."""
+    d = Decimal(repr(x))
+    if not d.is_finite():
+        raise RatesError(f"{where}: the number {x!r} is not finite")
+    text = format(d, "f")
+    return text[:-2] if text.endswith(".0") else text
+
+
+def _number_text(text: str, where: str) -> str:
+    """An ``.xlsx`` number's stored text, kept; an exponent form is written out positionally."""
+    t = text.strip()
+    if _DECIMAL.match(t):
+        return t
+    try:
+        d = Decimal(t)
+    except InvalidOperation:
+        raise RatesError(f"{where}: the number {t!r} is not a decimal number") from None
+    if not d.is_finite():
+        raise RatesError(f"{where}: the number {t!r} is not finite")
+    return format(d, "f")
+
+
+def _cell_value(cell: Cell | None, where: str) -> str | None:
+    """A cell's value text, or None when it has none (empty, a missing marker, an error)."""
+    if cell is None or cell.kind == "e":
+        return None
+    if cell.kind == "n":
+        return cell.text
+    if cell.kind == "s":
+        return _value(cell.text, where)
+    raise RatesError(f"{where}: a {'date' if cell.kind == 'd' else 'boolean'} cell is not a value")
+
+
+def _cell_date(cell: Cell, where: str, fmt: str | None, epoch: date | None) -> date:
+    """A cell's date: a date cell, a serial day number after ``epoch``, or text in ``fmt``."""
+    if cell.kind == "d":
+        try:
+            dt = datetime.fromisoformat(cell.text)
+        except ValueError:
+            raise RatesError(f"{where}: {cell.text!r} is not a date") from None
+        if dt.time() != time():
+            raise RatesError(f"{where}: {cell.text!r} is not a daily date (it has a time)")
+        return dt.date()
+    if cell.kind == "n" and epoch is not None:
+        serial = Decimal(cell.text)
+        if serial != serial.to_integral_value():
+            raise RatesError(f"{where}: date serial {cell.text} is not a daily date")
+        if epoch.year == 1899 and serial < 61:
+            raise RatesError(f"{where}: date serial {cell.text} is before 1900-03-01")
+        return epoch + timedelta(days=int(serial))
+    if cell.kind == "s" and fmt is not None:
+        return _date(cell.text, fmt, where)
+    raise RatesError(f"{where}: {cell.text!r} is not a date")
+
+
+def _sheet(book: Workbook, name: str, source: str) -> Grid:
+    """The sheet called ``name``; a workbook without one gives its first sheet."""
+    if name in book.sheets:
+        return book.sheets[name]
+    if not book.sheets:
+        raise RatesError(f"{source}: the workbook has no sheet")
+    return next(iter(book.sheets.values()))
+
+
+def _read_xls(body: bytes) -> Workbook:
+    """An ``.xls`` (BIFF) workbook. A number has no stored text: see :func:`_float_text`."""
+    try:
+        import xlrd
+    except ImportError:
+        raise RatesError(
+            "reading .xls needs xlrd: pip install 'tradedesk-marketdata[xls]'"
+        ) from None
+    try:
+        book = xlrd.open_workbook(file_contents=body, logfile=io.StringIO())
+    except Exception as e:  # untrusted bytes: any reader failure means it does not parse
+        raise RatesError(f"the download is not an .xls workbook ({e})") from None
+    sheets: dict[str, Grid] = {}
+    for sh in book.sheets():
+        grid: Grid = []
+        for i in range(sh.nrows):
+            line: list[Cell | None] = []
+            for j, c in enumerate(sh.row(i)):
+                where = f"sheet {sh.name!r} row {i + 1} column {j + 1}"
+                if c.ctype == xlrd.XL_CELL_TEXT:
+                    line.append(Cell("s", c.value))
+                elif c.ctype == xlrd.XL_CELL_NUMBER:
+                    line.append(Cell("n", _float_text(c.value, where)))
+                elif c.ctype == xlrd.XL_CELL_DATE:
+                    try:
+                        dt = xlrd.xldate.xldate_as_datetime(c.value, book.datemode)
+                    except xlrd.xldate.XLDateError as e:
+                        raise RatesError(f"{where}: not a date ({e!r})") from None
+                    line.append(Cell("d", dt.isoformat()))
+                elif c.ctype == xlrd.XL_CELL_BOOLEAN:
+                    line.append(Cell("b", str(bool(c.value)).lower()))
+                elif c.ctype == xlrd.XL_CELL_ERROR:
+                    line.append(Cell("e", xlrd.error_text_from_code.get(c.value, "#ERR")))
+                else:
+                    line.append(None)
+            grid.append(line)
+        sheets[sh.name] = grid
+    return Workbook(sheets, None)
+
+
+_XL = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+_XL_REL = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+_PKG_REL = "{http://schemas.openxmlformats.org/package/2006/relationships}Relationship"
+_CELL_REF = re.compile(r"^([A-Z]+)(\d+)$")
+
+
+def _xlsx_text(el: ET.Element) -> str:
+    """The text of a shared or inline string: its ``t``, or its rich-text runs' ``t``."""
+    t = el.find(f"{_XL}t")
+    if t is not None:
+        return t.text or ""
+    return "".join(rt.text or "" for r in el.findall(f"{_XL}r") for rt in r.findall(f"{_XL}t"))
+
+
+def _xlsx_cell(c: ET.Element, shared: list[str], where: str) -> Cell | None:
+    kind = c.get("t", "n")
+    v = c.find(f"{_XL}v")
+    if kind == "inlineStr":
+        is_ = c.find(f"{_XL}is")
+        return Cell("s", _xlsx_text(is_)) if is_ is not None else None
+    if v is None or v.text is None:
+        return None
+    if kind == "s":
+        try:
+            return Cell("s", shared[int(v.text)])
+        except (ValueError, IndexError):
+            raise RatesError(f"{where}: shared string {v.text!r} does not exist") from None
+    if kind == "str":
+        return Cell("s", v.text)
+    if kind == "n":
+        return Cell("n", _number_text(v.text, where))
+    if kind in ("d", "b", "e"):
+        return Cell(kind, v.text)
+    raise RatesError(f"{where}: cell type {kind!r} is not known")
+
+
+def _column(letters: str) -> int:
+    n = 0
+    for ch in letters:
+        n = n * 26 + ord(ch) - ord("A") + 1
+    return n - 1
+
+
+def _xlsx_grid(root: ET.Element, shared: list[str], name: str) -> Grid:
+    grid: Grid = []
+    data = root.find(f"{_XL}sheetData")
+    for row in data if data is not None else []:
+        if row.tag != f"{_XL}row":
+            continue
+        i = int(row.get("r", len(grid) + 1)) - 1
+        while len(grid) <= i:
+            grid.append([])
+        line = grid[i]
+        for c in row.findall(f"{_XL}c"):
+            ref = _CELL_REF.match(c.get("r", ""))
+            j = _column(ref[1]) if ref else len(line)
+            while len(line) <= j:
+                line.append(None)
+            line[j] = _xlsx_cell(c, shared, f"sheet {name!r} row {i + 1} column {j + 1}")
+    return grid
+
+
+def _read_xlsx(body: bytes) -> Workbook:
+    """An ``.xlsx`` (Office Open XML) workbook, read with the standard library.
+
+    A number keeps its stored ``<v>`` text, so the value is the publisher's decimal text.
+    """
+    try:
+        z = zipfile.ZipFile(io.BytesIO(body))
+        wb = ET.fromstring(z.read("xl/workbook.xml"))
+        rels = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
+        shared = []
+        if "xl/sharedStrings.xml" in z.namelist():
+            sst = ET.fromstring(z.read("xl/sharedStrings.xml"))
+            shared = [_xlsx_text(si) for si in sst.findall(f"{_XL}si")]
+        targets = {r.get("Id"): r.get("Target", "") for r in rels.iter(_PKG_REL)}
+        pr = wb.find(f"{_XL}workbookPr")
+        date1904 = pr is not None and pr.get("date1904", "false").lower() in ("1", "true")
+        sheets: dict[str, Grid] = {}
+        sheets_el = wb.find(f"{_XL}sheets")
+        for sh in sheets_el if sheets_el is not None else []:
+            name = sh.get("name", "")
+            target = targets.get(sh.get(_XL_REL), "")
+            path = target.lstrip("/") if target.startswith("/") else f"xl/{target}"
+            sheets[name] = _xlsx_grid(ET.fromstring(z.read(path)), shared, name)
+    except (zipfile.BadZipFile, KeyError, ET.ParseError, ValueError) as e:
+        if isinstance(e, RatesError):
+            raise
+        raise RatesError(f"the download is not an .xlsx workbook ({e})") from None
+    return Workbook(sheets, date(1904, 1, 1) if date1904 else date(1899, 12, 30))
+
+
+# Reserve Bank of Australia statistical tables: a title line, metadata rows (Title,
+# Description, Frequency, Type, Units, Source, Publication date, Series ID) and one
+# row per date. A short row has no value for the columns it does not reach. The same
+# layout comes as CSV (tables/csv/{table}-data.csv, dates "DD-Mon-YYYY") and as an
+# .xls workbook with date cells (the historical files under tables/xls-hist/).
+# A workbook is one whole file, so for rba-xls (and rbnz) the configured start drops
+# the rows dated before it; the rba CSV reads every row, as it always has.
+
+
+def _rba_table(
+    grid: Grid, series: str, source: str, fmt: str | None, start: date | None = None
+) -> tuple[dict[date, Row], bool]:
+    """The rows of one RBA table column. A row dated before ``start`` is not read."""
+    meta: dict[str, list[Cell | None]] = {}
+    data_at = None
+    for i, ln in enumerate(grid):
+        name = _label(ln[0]) if ln else ""
+        if name == "Series ID":
+            meta[name] = ln
+            data_at = i + 1
+            break
+        if name:
+            meta.setdefault(name, ln)
+    if data_at is None:
+        raise RatesError(f"{source}: no 'Series ID' row")
+    ids = [_label(c) for c in meta["Series ID"]]
+    if series not in ids[1:]:
+        raise RatesError(f"{source}: series ID {series!r} is not in the table")
+    c = ids.index(series)
+
+    def cell(row_name: str) -> Cell | None:
+        r = meta.get(row_name)
+        x = r[c] if r is not None and c < len(r) else None
+        return x if x is not None and x.text.strip() else None
+
+    freq = cell("Frequency")
+    frequency = freq.text.strip() if freq is not None else None
+    if frequency is not None and frequency.lower() != "daily":
+        raise RatesError(f"{source}: series {series} has frequency {frequency!r}, not Daily")
+    units = cell("Units")
+    unit = units.text.strip() if units is not None else None
+    pub = cell("Publication date")
+    published = (
+        _cell_date(pub, f"{source} Publication date", fmt, None).isoformat() if pub else None
+    )
+    rows: dict[date, Row] = {}
+    for n, line in enumerate(grid[data_at:], data_at + 1):
+        if not line or line[0] is None or not line[0].text.strip():
+            continue
+        where = f"{source} line {n}"
+        d = _cell_date(line[0], where, fmt, None)
+        if start is not None and d < start:
+            continue
+        value = _cell_value(line[c], where) if c < len(line) else None
+        _put(rows, d, Row(value, unit, published), where)
+    return rows, frequency is not None
 
 
 def _rba_url(cfg: SeriesConfig) -> str:
@@ -426,44 +716,87 @@ def _rba_check(cfg: SeriesConfig) -> None:
 
 def _rba_parse(body: bytes, cfg: SeriesConfig) -> tuple[dict[date, Row], bool]:
     _, series = _split_key(cfg, "table", "series ID")
-    lines = list(csv.reader(io.StringIO(_text(body))))
-    meta: dict[str, list[str]] = {}
-    data_at = None
-    for i, ln in enumerate(lines):
-        if ln and ln[0].strip() == "Series ID":
-            meta["Series ID"] = ln
-            data_at = i + 1
-            break
-        if ln and ln[0].strip():
-            meta.setdefault(ln[0].strip(), ln)
-    if data_at is None:
-        raise RatesError("rba: no 'Series ID' row")
-    ids = [c.strip() for c in meta["Series ID"]]
-    if series not in ids[1:]:
-        raise RatesError(f"rba: series ID {series!r} is not in the table")
-    c = ids.index(series)
+    grid: Grid = [[Cell("s", x) for x in ln] for ln in csv.reader(io.StringIO(_text(body)))]
+    return _rba_table(grid, series, "rba", "%d-%b-%Y")
 
-    def cell(row_name: str) -> str | None:
-        r = meta.get(row_name)
-        return r[c].strip() if r is not None and c < len(r) and r[c].strip() else None
 
-    frequency = cell("Frequency")
-    if frequency is not None and frequency.lower() != "daily":
-        raise RatesError(f"rba: series {series} has frequency {frequency!r}, not Daily")
-    unit = cell("Units")
-    pub_text = cell("Publication date")
-    published = (
-        _date(pub_text, "%d-%b-%Y", "rba Publication date").isoformat() if pub_text else None
+def _rba_xls_url(cfg: SeriesConfig) -> str:
+    file, _ = _split_key(cfg, "file", "series ID")
+    return f"https://www.rba.gov.au/statistics/tables/xls-hist/{quote(file.lower())}.xls"
+
+
+def _rba_xls_check(cfg: SeriesConfig) -> None:
+    _split_key(cfg, "file", "series ID")
+
+
+def _rba_xls_parse(body: bytes, cfg: SeriesConfig) -> tuple[dict[date, Row], bool]:
+    _, series = _split_key(cfg, "file", "series ID")
+    grid = _sheet(_read_xls(body), "Data", "rba-xls")
+    return _rba_table(grid, series, "rba-xls", "%d-%b-%Y", cfg.start)
+
+
+# Reserve Bank of New Zealand statistical tables: an .xlsx workbook. The "Data" sheet has
+# header rows (group, series, "Notes", "Unit", "Series Id"; column A names each row),
+# then one row per date with a date cell in column A. The "Table Description" sheet
+# states the "Published Date". No frequency is stated, so the dates must be daily.
+
+#: The file names whose default URL is known: "h{letter}{number}..." as in "hb2-daily".
+_RBNZ_FILE = re.compile(r"^h([a-z])(\d+)[a-z0-9-]*$")
+
+
+def _rbnz_url(cfg: SeriesConfig) -> str:
+    file, _ = _split_key(cfg, "file", "Series Id")
+    m = _RBNZ_FILE.match(file.lower())
+    if m is None:
+        raise RatesError(f"{cfg.id}: no default URL for rbnz file {file!r}; set 'url'")
+    return (
+        "https://www.rbnz.govt.nz/-/media/project/sites/rbnz/files/statistics/series/"
+        f"{m[1]}/{m[1]}{m[2]}/{quote(file.lower())}.xlsx"
     )
+
+
+def _rbnz_check(cfg: SeriesConfig) -> None:
+    _split_key(cfg, "file", "Series Id")
+    if cfg.url is None:
+        _rbnz_url(cfg)
+
+
+def _rbnz_parse(body: bytes, cfg: SeriesConfig) -> tuple[dict[date, Row], bool]:
+    _, series = _split_key(cfg, "file", "Series Id")
+    book = _read_xlsx(body)
+    grid = _sheet(book, "Data", "rbnz")
+    head = None
+    unit_row: list[Cell | None] = []
+    for i, ln in enumerate(grid):
+        name = _label(ln[0]).lower() if ln else ""
+        if name == "unit":
+            unit_row = ln
+        if name == "series id":
+            head = i
+            break
+    if head is None:
+        raise RatesError("rbnz: no 'Series Id' row")
+    ids = [_label(c) for c in grid[head]]
+    if series not in ids[1:]:
+        raise RatesError(f"rbnz: series Id {series!r} is not in the table")
+    c = ids.index(series)
+    unit = (_label(unit_row[c]) or None) if c < len(unit_row) else None
+    published = None
+    for ln in book.sheets.get("Table Description", []):
+        if ln and _label(ln[0]).lower() == "published date" and len(ln) > 1 and ln[1]:
+            published = _cell_date(ln[1], "rbnz Published Date", None, book.epoch).isoformat()
+            break
     rows: dict[date, Row] = {}
-    for n, line in enumerate(lines[data_at:], data_at + 1):
-        if not line or not line[0].strip():
+    for n, line in enumerate(grid[head + 1 :], head + 2):
+        if not line or line[0] is None or not line[0].text.strip():
             continue
-        where = f"rba line {n}"
-        d = _date(line[0], "%d-%b-%Y", where)
-        value = _value(line[c], where) if c < len(line) else None
+        where = f"rbnz row {n}"
+        d = _cell_date(line[0], where, None, book.epoch)
+        if cfg.start is not None and d < cfg.start:
+            continue
+        value = _cell_value(line[c], where) if c < len(line) else None
         _put(rows, d, Row(value, unit, published), where)
-    return rows, frequency is not None
+    return rows, False
 
 
 FORMATS: dict[str, Format] = {
@@ -472,6 +805,8 @@ FORMATS: dict[str, Format] = {
     "boe": Format("boe", 1, _boe_url, _boe_parse, _no_key_check),
     "boj": Format("boj", 1, _boj_url, _boj_parse, _boj_check),
     "rba": Format("rba", 1, _rba_url, _rba_parse, _rba_check),
+    "rba-xls": Format("rba-xls", 1, _rba_xls_url, _rba_xls_parse, _rba_xls_check, "xls"),
+    "rbnz": Format("rbnz", 1, _rbnz_url, _rbnz_parse, _rbnz_check, "xlsx"),
 }
 
 
@@ -515,11 +850,11 @@ def parse(body: bytes, cfg: SeriesConfig) -> dict[date, Row]:
 
 @dataclass(frozen=True)
 class Fetch:
-    """One line of ``_fetches.jsonl``."""
+    """One line of ``_fetches.jsonl``. ``http_status`` is None for a ``file:`` URL."""
 
     fetched_at: str
     url: str
-    http_status: int
+    http_status: int | None
     sha256: str
     bytes: int
     raw: str
@@ -687,7 +1022,7 @@ def read_fetches(sdir: Path) -> list[Fetch]:
                 Fetch(
                     d["fetched_at"],
                     d["url"],
-                    int(d["http_status"]),
+                    None if d["http_status"] is None else int(d["http_status"]),
                     d["sha256"],
                     int(d["bytes"]),
                     d["raw"],
@@ -738,9 +1073,9 @@ def stored_config(sdir: Path) -> SeriesConfig | None:
 
 @dataclass(frozen=True)
 class Response:
-    """One successful download: the HTTP status and the body."""
+    """One successful download: the HTTP status (None for a ``file:`` URL) and the body."""
 
-    status: int
+    status: int | None
     body: bytes
 
 
@@ -750,7 +1085,17 @@ def download(
     timeout: tuple[float, float] = (DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT),
     retries: int = DEFAULT_RETRIES,
 ) -> Response:
-    """GET one URL with the package's backoff. Raises :class:`RatesError` after ``retries``."""
+    """GET one URL with the package's backoff. Raises :class:`RatesError` after ``retries``.
+
+    A ``file:`` URL reads a local file instead: a publisher's file that a person
+    downloaded, for a site that refuses scripted requests. It has no HTTP status.
+    """
+    if urlparse(url).scheme == "file":
+        path = Path(url2pathname(urlparse(url).path))
+        try:
+            return Response(None, path.read_bytes())
+        except OSError as e:
+            raise RatesError(f"{url}: {e}") from None
     last_exc: Exception | None = None
     delay = RETRY_BASE_DELAY
     for attempt in range(1, retries + 1):
@@ -821,7 +1166,9 @@ def fetch_series(
     new = (
         None
         if prior and prior[-1][0].sha256 == sha
-        else Fetch(fetched_at, url, resp.status, sha, len(body), f"{RAW}/{sha}.csv")
+        else Fetch(
+            fetched_at, url, resp.status, sha, len(body), f"{RAW}/{sha}.{FORMATS[cfg.source].ext}"
+        )
     )
     fetches = prior if new is None else [*prior, (new, body)]
     built = build(cfg, fetches)
