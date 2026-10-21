@@ -40,7 +40,8 @@ dev = [
     "xlrd>=2.0",
 ]
 parquet = ["pyarrow>=16.1"]
-# Reads .xls downloads (the shiller format of tradedesk-md-dividends).
+# Reads .xls downloads (the shiller format of tradedesk-md-dividends, the rba-xls format
+# of tradedesk-md-rates).
 xls = ["xlrd>=2.0"]
 tooling = ["llm-tldr[dev]>=1.5.2"]
 

@@ -620,11 +620,11 @@ def parse(body: bytes, cfg: SeriesConfig, role: str) -> dict[date, Row]:
 
 @dataclass(frozen=True)
 class Fetch:
-    """One line of ``_fetches.jsonl``."""
+    """One line of ``_fetches.jsonl``. ``http_status`` is None for a ``file:`` URL."""
 
     fetched_at: str
     url: str
-    http_status: int
+    http_status: int | None
     sha256: str
     bytes: int
     raw: str
@@ -877,7 +877,7 @@ def read_fetches(sdir: Path) -> list[Fetch]:
                 Fetch(
                     d["fetched_at"],
                     d["url"],
-                    int(d["http_status"]),
+                    None if d["http_status"] is None else int(d["http_status"]),
                     d["sha256"],
                     int(d["bytes"]),
                     d["raw"],
