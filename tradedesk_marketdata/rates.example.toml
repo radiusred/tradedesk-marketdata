@@ -15,17 +15,25 @@
 #                rba   RBA statistical table;     key = "{table}/{series ID}"
 #                rba-xls  RBA statistical table, .xls workbook; key = "{file}/{series ID}"
 #                rbnz  RBNZ statistical table, .xlsx workbook; key = "{file}/{Series Id}"
+#                snb   SNB data portal cube CSV;  key = "{cube}/D0(item)" or
+#                      "{cube}/D0(item),D1(item)", one item per dimension
+#                boc   Bank of Canada Valet JSON; key = the series name
+#                swea  Riksbank SWEA API JSON;    key = the series id
+#                swestr Riksbank SWESTR API JSON; key = the SWESTR id
+#                norges Norges Bank SDMX CSV;     key = "{flow}/{series key}" (one series)
 #   key      = the source's own code for the series (required; shape as above)
 #   url      = a URL to use instead of the format's default (optional); a file: URL
 #              (file:///path/to/workbook.xlsx) reads a file downloaded by hand
-#   unit     = the unit, for a source that states none (fred, boe); a unit the
-#              source states wins, and a different one here is an error (optional)
+#   unit     = the unit, for a source that states none (fred, boe, snb, swea,
+#              swestr); a unit the source states wins, and a different one
+#              here is an error (optional)
 #   calendar = "weekdays" (default) or "all": the days on which a value is expected,
 #              between the first and the last observation; a day without one is
 #              listed in gaps.csv, never filled
 #   start    = YYYY-MM-DD, the first date to ask for, where the format allows it
-#              (optional; boe asks from 1950-01-01 by default; rba-xls and rbnz
-#              read the whole workbook and drop the rows dated before start)
+#              (optional; boe asks from 1950-01-01, swea and swestr from
+#              1900-01-01 by default; rba-xls and rbnz read the whole workbook
+#              and drop the rows dated before start)
 
 [[series]]
 id = "EXAMPLE-FRED"
@@ -37,3 +45,9 @@ unit = "percent"
 id = "EXAMPLE-ECB"
 source = "ecb"
 key = "EXAMPLEFLOW/B.EXAMPLE.KEY"
+
+[[series]]
+id = "EXAMPLE-SNB"
+source = "snb"
+key = "examplecube/D0(EXAMPLE)"
+unit = "percent"

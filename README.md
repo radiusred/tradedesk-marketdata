@@ -888,6 +888,11 @@ series):
 | `rba` | RBA statistical table, CSV | `{table}/{series ID}` |
 | `rba-xls` | RBA statistical table, `.xls` workbook (the historical files under `tables/xls-hist/`) | `{file}/{series ID}` |
 | `rbnz` | RBNZ statistical table, `.xlsx` workbook | `{file}/{Series Id}` |
+| `snb` | Swiss National Bank data portal (`data.snb.ch`), cube CSV | `{cube}/{dimension selection}`, one item per dimension: `D0(item)` or `D0(item),D1(item)` |
+| `boc` | Bank of Canada Valet API, JSON | the series name |
+| `swea` | Sveriges Riksbank SWEA API, JSON | the series id |
+| `swestr` | Sveriges Riksbank SWESTR API, JSON | the SWESTR id |
+| `norges` | Norges Bank SDMX data API, CSV | `{flow}/{series key}`, one series (no wildcard, no `+`) |
 
 The workbook formats read the publisher's table layout: `rba-xls` the same
 metadata rows as the RBA CSV (`Frequency`, `Units`, `Publication date`,
@@ -925,17 +930,20 @@ The fetch keeps the file as a raw file exactly as a download, and its
 `_fetches.jsonl` line has `http_status` `null`.
 
 Optional keys: `url` (instead of the format's default URL), `unit` (for a
-source that states none, such as `fred` and `boe`; a unit the source states
+source that states none, such as `fred`, `boe`, `snb`, `swea` and `swestr`; a unit the source states
 wins, and a different `unit` is an error), `calendar` (`weekdays`, the
 default, or `all`) and `start` (the first date to ask for, where the format
 allows it). Only daily series are accepted: a download whose dates or stated
-frequency are not daily is refused. A format that states no frequency (`fred`,
-`boe`, `rbnz`, or an `rba` or `rba-xls` column without a `Frequency` row) is judged by its dates: the
-median step between dated rows must be 4 days or fewer (a weekend plus a
-holiday), and one dated row is not enough to tell. A download that states a
-daily frequency (`ecb`, `boj`, or an `rba` or `rba-xls` column with `Frequency` `Daily`) is
-accepted with one dated row. A weekly or monthly series is refused before
-anything is written.
+frequency are not daily is refused, and the refusal names the source and the
+series key. A format that states no frequency (`fred`, `boe`, `rbnz`, `snb`,
+`swea`, `swestr`, a `boc` series without a `dateFormat`, or an `rba` or
+`rba-xls` column without a `Frequency` row) is judged by its dates: the median
+step between dated rows must be 4 days or fewer (a weekend plus a holiday),
+and one dated row is not enough to tell; an `snb` date that is not a day
+(`YYYY-MM`) is refused at once. A download that states a daily frequency
+(`ecb`, `boj`, `norges` `FREQ` `B` or `D`, `boc` `dateFormat` `daily`, or an
+`rba` or `rba-xls` column with `Frequency` `Daily`) is accepted with one dated
+row. A weekly or monthly series is refused before anything is written.
 
 ### The store layout
 
@@ -944,17 +952,20 @@ directories that start with `_`, so they do not see this area.
 
 | File | Content |
 |---|---|
-| `_raw/{sha256}.{ext}` | every downloaded body, kept unchanged under its sha256 with the format's extension (`csv`; `xls` for `rba-xls`; `xlsx` for `rbnz`); never deleted |
+| `_raw/{sha256}.{ext}` | every downloaded body, kept unchanged under its sha256 with the format's extension (`csv`; `json` for `boc`, `swea` and `swestr`; `xls` for `rba-xls`; `xlsx` for `rbnz`); never deleted |
 | `_fetches.jsonl` | one line per kept download: `fetched_at` (UTC), `url`, `http_status` (the response's HTTP status; `null` for a `file:` URL), `sha256`, `bytes`, `raw` |
 | `observations.csv` | `date,value,unit,published,revised`, one row per date with a value |
 | `gaps.csv` | `date,reason`, one row per day without a value |
 | `manifest.json` | the series' configuration, the parser and its version, every fetch, and the sha256, row count and span of the two CSV files |
 
-- **`value`** is the source's decimal text, unchanged.
+- **`value`** is the source's decimal text, unchanged. For a JSON source it
+  is the number as the download writes it (`3.250` stays `3.250`).
 - **`published`** is the publication date as the source states it, written
   `YYYY-MM-DD` (`boj`: `LAST_UPDATE`; `rba`, `rba-xls`: the table's
-  `Publication date`; `rbnz`: the `Published Date`).
-  It is empty when the source states none (`fred`, `ecb`, `boe`); the fetch
+  `Publication date`; `rbnz`: the `Published Date`; `snb`: the cube's
+  `PublishingDate`; `swestr`: the UTC date of each day's `publicationTime`).
+  It is empty when the source states none (`fred`, `ecb`, `boe`, `boc`,
+  `swea`, `norges`); the fetch
   time in `_fetches.jsonl` is then the only time on record.
 - **`revised`** is `true` when an earlier fetch held another value for the
   date.
@@ -962,8 +973,9 @@ directories that start with `_`, so they do not see this area.
   `calendar`) between the first and last observation that has no value, and
   each row the source lists without a value. The reasons are
   `missing_in_source` (the source lists the date with no value: an empty
-  cell, `.`, `NaN`, `null`, a workbook error cell such as `#N/A`, or an ECB
-  `OBS_STATUS` of `M`), `no_row` (the source
+  cell, `.`, `NaN`, `null`, a JSON `null`, a workbook error cell such as
+  `#N/A`, a `boc` observation without the series, or an `OBS_STATUS` of `M`),
+  `no_row` (the source
   does not list the date) and `withdrawn` (an earlier fetch had a value, the
   latest fetch that covers the date has none).
 - **The files are rebuilt from every fetch, in order.** A later fetch wins for
