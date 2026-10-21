@@ -2649,12 +2649,16 @@ dev = [
     { name = "pytest-cov" },
     { name = "ruff" },
     { name = "types-requests" },
+    { name = "xlrd" },
 ]
 parquet = [
     { name = "pyarrow" },
 ]
 tooling = [
     { name = "llm-tldr", extra = ["dev"] },
+]
+xls = [
+    { name = "xlrd" },
 ]
 
 [package.metadata]
@@ -2671,9 +2675,11 @@ requires-dist = [
     { name = "rich", specifier = ">=14.2" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.2" },
     { name = "types-requests", marker = "extra == 'dev'", specifier = ">=2.32.0" },
+    { name = "xlrd", marker = "extra == 'dev'", specifier = ">=2.0" },
+    { name = "xlrd", marker = "extra == 'xls'", specifier = ">=2.0" },
     { name = "zstandard", specifier = ">=0.25.0" },
 ]
-provides-extras = ["dev", "parquet", "tooling"]
+provides-extras = ["dev", "parquet", "tooling", "xls"]
 
 [[package]]
 name = "transformers"
@@ -3098,6 +3104,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/d2/03/a94d404ca09a89a7301a7008467aed525d4cdeb9186d262154dd23208709/virtualenv-20.38.0.tar.gz", hash = "sha256:94f39b1abaea5185bf7ea5a46702b56f1d0c9aa2f41a6c2b8b0af4ddc74c10a7", size = 5864558, upload-time = "2026-02-19T07:48:02.385Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/42/d7/394801755d4c8684b655d35c665aea7836ec68320304f62ab3c94395b442/virtualenv-20.38.0-py3-none-any.whl", hash = "sha256:d6e78e5889de3a4742df2d3d44e779366325a90cf356f15621fddace82431794", size = 5837778, upload-time = "2026-02-19T07:47:59.778Z" },
+]
+
+[[package]]
+name = "xlrd"
+version = "2.0.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/07/5a/377161c2d3538d1990d7af382c79f3b2372e880b65de21b01b1a2b78691e/xlrd-2.0.2.tar.gz", hash = "sha256:08b5e25de58f21ce71dc7db3b3b8106c1fa776f3024c54e45b45b374e89234c9", size = 100167, upload-time = "2025-06-14T08:46:39.039Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1a/62/c8d562e7766786ba6587d09c5a8ba9f718ed3fa8af7f4553e8f91c36f302/xlrd-2.0.2-py2.py3-none-any.whl", hash = "sha256:ea762c3d29f4cca48d82df517b6d89fbce4db3107f9d78713e48cd321d5c9aa9", size = 96555, upload-time = "2025-06-14T08:46:37.766Z" },
 ]
 
 [[package]]

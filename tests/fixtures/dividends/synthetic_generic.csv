@@ -1,0 +1,6 @@
+Synthetic dividend points, test data only
+day;points;released
+2024-01-01;;
+2024-01-02;3.5;2024-01-02T18:00:00Z
+2024-01-04;3.75;2024-01-04T18:00:00Z
+2024-01-05;4;2024-01-05T18:00:00Z
