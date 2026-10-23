@@ -6,7 +6,8 @@ series lives in ``{store}/_reference/rates/{id}/``:
 
 - ``_raw/{sha256}.{ext}``: every downloaded body, content-addressed, with the
   format's extension (``csv``, ``json``, ``xls`` or ``xlsx``). Never changed or
-  deleted.
+  deleted. A format published as more than one file (``mof``) downloads each
+  file and keeps each body as its own raw file.
 - ``_fetches.jsonl``: one line per kept download: ``fetched_at`` (UTC),
   ``url``, ``sha256``, ``bytes``, ``raw`` (the path under the series
   directory).
@@ -105,7 +106,9 @@ class SeriesConfig:
     id: str
     source: str
     key: str
-    url: str | None = None
+    #: A URL to use instead of the format's default; a tuple of URLs, in order, for a
+    #: format that reads more than one file.
+    url: str | tuple[str, ...] | None = None
     unit: str | None = None
     calendar: str = "weekdays"
     start: date | None = None
@@ -115,7 +118,7 @@ class SeriesConfig:
             "id": self.id,
             "source": self.source,
             "key": self.key,
-            "url": self.url,
+            "url": list(self.url) if isinstance(self.url, tuple) else self.url,
             "unit": self.unit,
             "calendar": self.calendar,
             "start": self.start.isoformat() if self.start else None,
@@ -125,8 +128,19 @@ class SeriesConfig:
     def from_json(cls, d: dict[str, Any]) -> SeriesConfig:
         return _series_config(d, "manifest")
 
+    def resolved_urls(self) -> tuple[str, ...]:
+        """The URLs one fetch downloads, in order: one, except for a multi-file format."""
+        if isinstance(self.url, tuple):
+            return self.url
+        url = self.url or FORMATS[self.source].url(self)
+        return url if isinstance(url, tuple) else (url,)
+
     def resolved_url(self) -> str:
-        return self.url or FORMATS[self.source].url(self)
+        """The URL of a single-file format."""
+        urls = self.resolved_urls()
+        if len(urls) != 1:
+            raise RatesError(f"{self.id}: a {self.source} fetch reads {len(urls)} files")
+        return urls[0]
 
 
 _CONFIG_KEYS = frozenset({"id", "source", "key", "url", "unit", "calendar", "start"})
@@ -147,9 +161,9 @@ def _series_config(d: dict[str, Any], where: str) -> SeriesConfig:
         raise RatesError(
             f"{where} ({sid}): source {source!r} is not one of {', '.join(sorted(FORMATS))}"
         )
-    for k in ("url", "unit"):
-        if d.get(k) is not None and (not isinstance(d[k], str) or not d[k].strip()):
-            raise RatesError(f"{where} ({sid}): {k!r} must be a non-empty string")
+    if d.get("unit") is not None and (not isinstance(d["unit"], str) or not d["unit"].strip()):
+        raise RatesError(f"{where} ({sid}): 'unit' must be a non-empty string")
+    url = _config_url(d.get("url"), FORMATS[source], f"{where} ({sid})")
     calendar = d.get("calendar") or "weekdays"
     if calendar not in CALENDARS:
         raise RatesError(f"{where} ({sid}): calendar must be one of {', '.join(CALENDARS)}")
@@ -165,13 +179,32 @@ def _series_config(d: dict[str, Any], where: str) -> SeriesConfig:
         id=sid,
         source=source,
         key=d["key"].strip(),
-        url=d["url"].strip() if d.get("url") else None,
+        url=url,
         unit=d["unit"].strip() if d.get("unit") else None,
         calendar=calendar,
         start=start,
     )
     FORMATS[source].check_key(cfg)
     return cfg
+
+
+def _config_url(url: Any, fmt: Format, where: str) -> str | tuple[str, ...] | None:
+    """A configured ``url``: a string, or a list of one URL per file for a multi-file format."""
+    if url is None:
+        return None
+    if fmt.files == 1:
+        if not isinstance(url, str) or not url.strip():
+            raise RatesError(f"{where}: 'url' must be a non-empty string")
+        return url.strip()
+    if (
+        not isinstance(url, list)
+        or len(url) != fmt.files
+        or not all(isinstance(u, str) and u.strip() for u in url)
+    ):
+        raise RatesError(
+            f"{where}: a {fmt.name} 'url' is a list of {fmt.files} URLs, one per file, in order"
+        )
+    return tuple(u.strip() for u in url)
 
 
 def load_config(path: Path) -> list[SeriesConfig]:
@@ -216,12 +249,18 @@ class Format:
 
     name: str
     version: int
-    url: Callable[[SeriesConfig], str]
+    #: The default URL, or for a multi-file format the default URLs in order.
+    url: Callable[[SeriesConfig], str | tuple[str, ...]]
     #: The dated rows, and True when the download states a daily frequency for them.
     parse: Callable[[bytes, SeriesConfig], tuple[dict[date, Row], bool]]
     check_key: Callable[[SeriesConfig], None]
     #: The extension of the kept raw file: ``_raw/{sha256}.{ext}``.
     ext: str = "csv"
+    #: The number of files one fetch downloads. Each is parsed alone and kept as a raw file.
+    files: int = 1
+    #: For a multi-file format: refuses the downloads of one fetch, in order, when they do
+    #: not join.
+    join: Callable[[Sequence[bytes], SeriesConfig], None] | None = None
 
 
 def _text(body: bytes) -> str:
@@ -1120,6 +1159,124 @@ def _bundesbank_parse(body: bytes, cfg: SeriesConfig) -> tuple[dict[date, Row], 
     return rows, freq is not None
 
 
+# Ministry of Finance Japan, JGB interest rates (the English CSV files): an all-dates file
+# (historical/jgbcme_all.csv, up to the end of the last month) and a current-month file
+# (jgbcme.csv). Each is cp932 text with CRLF line ends: a title line ("Interest Rate", or
+# "Interest Rate (October 2026)" for the current month) with "(Unit : %)" in a later cell,
+# a header "Date,1Y,2Y,...", one row per day with a "YYYY/M/D" date and "-" for no value,
+# and, after an empty row, a trailer (a note on the current-month file). One fetch reads
+# both files; they must join without overlap or gap.
+
+_MOF_BASE = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/"
+_MOF_TITLE = re.compile(r"^Interest Rate(?: \(([A-Z][a-z]+) (\d{4})\))?$")
+_MOF_UNIT = re.compile(r"^\(Unit\s*:\s*(.+?)\s*\)$")
+_MOF_DATE = re.compile(r"^\d{4}/\d{1,2}/\d{1,2}$")
+_MONTHS = (
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+)  # fmt: skip
+
+
+@dataclass(frozen=True)
+class _MofFile:
+    """One MOF file: ``month`` is the first day of the month a current-month file names."""
+
+    month: date | None
+    rows: dict[date, Row]
+
+
+def _mof_url(cfg: SeriesConfig) -> tuple[str, ...]:
+    return (f"{_MOF_BASE}historical/jgbcme_all.csv", f"{_MOF_BASE}jgbcme.csv")
+
+
+def _mof_read(body: bytes, cfg: SeriesConfig) -> _MofFile:
+    """One file's rows for the tenor column ``cfg.key``.
+
+    In the all-dates file the rows before the tenor's first value are not read: the
+    tenor was not issued then, so they are not gaps. A row dated before ``cfg.start`` is
+    not read either (each file is one whole download).
+    """
+    try:
+        text = body.decode("cp932")
+    except UnicodeDecodeError as e:
+        raise RatesError(f"mof: the download is not cp932 (Shift_JIS) text ({e})") from None
+    lines = list(csv.reader(io.StringIO(text)))
+    title = [c.strip() for c in lines[0]] if lines else []
+    m = _MOF_TITLE.match(title[0]) if title else None
+    if m is None:
+        raise RatesError(
+            "mof: the title line is not 'Interest Rate' or 'Interest Rate (<Month> <YYYY>)'"
+        )
+    month = None
+    if m[1] is not None:
+        if m[1] not in _MONTHS:
+            raise RatesError(f"mof: the title names month {m[1]!r}, not a month")
+        month = date(int(m[2]), _MONTHS.index(m[1]) + 1, 1)
+    unit = next((u[1] for c in title[1:] if (u := _MOF_UNIT.match(c))), None)
+    header = [c.strip() for c in lines[1]] if len(lines) > 1 else []
+    if not header or header[0] != "Date":
+        raise RatesError("mof: the header is not 'Date,<tenor>,...'")
+    if header.count(cfg.key) != 1:
+        raise RatesError(
+            f"mof: tenor {cfg.key!r} is not one column of the header ({', '.join(header[1:])})"
+        )
+    c = header.index(cfg.key)
+    rows: dict[date, Row] = {}
+    started = month is not None
+    ended = False
+    for n, line in enumerate(lines[2:], 3):
+        where = f"mof line {n}"
+        first = line[0].strip() if line else ""
+        if ended or not first:
+            # The table ends at its first row without a date; a note may follow.
+            ended = True
+            if _MOF_DATE.match(first) or any(x.strip() for x in line[1:]):
+                raise RatesError(f"{where}: a row after the end of the table holds data")
+            continue
+        if len(line) != len(header):
+            raise RatesError(f"{where}: {len(line)} fields, not {len(header)}")
+        d = _date(first, "%Y/%m/%d", where)
+        if month is not None and (d.year, d.month) != (month.year, month.month):
+            raise RatesError(f"{where}: date {d.isoformat()} is not in {m[1]} {m[2]}")
+        if cfg.start is not None and d < cfg.start:
+            continue
+        v = line[c].strip()
+        value = None if v == "-" else _value(v, where)
+        if value is None and not started:
+            continue
+        started = True
+        _put(rows, d, Row(value, unit, None), where)
+    return _MofFile(month, rows)
+
+
+def _mof_parse(body: bytes, cfg: SeriesConfig) -> tuple[dict[date, Row], bool]:
+    # The publisher's daily table: the two files hold daily rows only. The join of the
+    # two files is also judged by its dates (_mof_join).
+    return _mof_read(body, cfg).rows, True
+
+
+def _mof_join(bodies: Sequence[bytes], cfg: SeriesConfig) -> None:
+    """Refuse an all-dates and a current-month file that overlap or leave a month out."""
+    hist, cur = (_mof_read(b, cfg) for b in bodies)
+    if hist.month is not None:
+        raise RatesError("mof: the first file is a current-month file, not the all-dates file")
+    if cur.month is None:
+        raise RatesError("mof: the second file is an all-dates file, not the current-month file")
+    last, first = max(hist.rows), min(cur.rows)
+    if first <= last:
+        raise RatesError(
+            f"mof: the files overlap: the all-dates file ends {last.isoformat()}, "
+            f"the current-month file starts {first.isoformat()}"
+        )
+    after = date(last.year + last.month // 12, last.month % 12 + 1, 1)
+    if cur.month != after:
+        raise RatesError(
+            f"mof: the files leave a gap: the all-dates file ends {last.isoformat()}, "
+            f"the current-month file is for {cur.month.strftime('%Y-%m')}"
+        )
+    _check_daily({**hist.rows, **cur.rows}, cfg)
+
+
 FORMATS: dict[str, Format] = {
     "fred": Format("fred", 1, _fred_url, _fred_parse, _no_key_check),
     "ecb": Format("ecb", 1, _ecb_url, _ecb_parse, _ecb_check),
@@ -1134,6 +1291,7 @@ FORMATS: dict[str, Format] = {
     "swestr": Format("swestr", 1, _swestr_url, _swestr_parse, _plain_key_check, "json"),
     "norges": Format("norges", 1, _norges_url, _norges_parse, _norges_check),
     "bundesbank": Format("bundesbank", 1, _bundesbank_url, _bundesbank_parse, _bundesbank_check),
+    "mof": Format("mof", 1, _mof_url, _mof_parse, _plain_key_check, files=2, join=_mof_join),
 }
 
 
@@ -1453,7 +1611,11 @@ def download(
 
 @dataclass
 class FetchResult:
-    """What one series' fetch did. ``status`` is ``updated``, ``unchanged`` or ``failed``."""
+    """What one series' fetch did. ``status`` is ``updated``, ``unchanged`` or ``failed``.
+
+    ``sha256`` is the download's sha256; for a multi-file format, each file's, in order,
+    separated by a space.
+    """
 
     id: str
     status: str
@@ -1482,7 +1644,9 @@ def fetch_series(
     """Download one series, keep the raw body and rebuild its parsed files and manifest.
 
     Every earlier raw file is checked against its sha256 and the new body is parsed
-    before anything is written. The series' source and key must match the stored
+    before anything is written. A multi-file format downloads and parses each of its
+    files, in order, and its join check passes, before anything is written; each body is
+    kept as its own raw file and fetch line. The series' source and key must match the stored
     manifest's: another series cannot be written under the same id.
     """
     sdir = series_dir(store, cfg.id)
@@ -1493,38 +1657,46 @@ def fetch_series(
             f"not {cfg.source} {cfg.key!r}"
         )
     prior = [(f, _read_raw(sdir, f)) for f in read_fetches(sdir)]
-    url = cfg.resolved_url()
-    fetched_at = now()
-    resp = (get or download)(url)
-    body = resp.body
-    parse(body, cfg)
-    sha = _sha(body)
+    fmt = FORMATS[cfg.source]
+    got: list[tuple[str, str, Response]] = []
+    for url in cfg.resolved_urls():
+        fetched_at = now()
+        resp = (get or download)(url)
+        parse(resp.body, cfg)
+        got.append((url, fetched_at, resp))
+    if fmt.join is not None:
+        fmt.join([resp.body for _, _, resp in got], cfg)
 
-    new = (
-        None
-        if prior and prior[-1][0].sha256 == sha
-        else Fetch(
-            fetched_at, url, resp.status, sha, len(body), f"{RAW}/{sha}.{FORMATS[cfg.source].ext}"
-        )
-    )
-    fetches = prior if new is None else [*prior, (new, body)]
+    # A body equal to the latest kept body (of a multi-file format: from the same URL)
+    # adds no fetch.
+    fetches = list(prior)
+    new: list[tuple[Fetch, bytes]] = []
+    for url, fetched_at, resp in got:
+        body, sha = resp.body, _sha(resp.body)
+        latest = next((f for f, _ in reversed(fetches) if fmt.files == 1 or f.url == url), None)
+        if latest is not None and latest.sha256 == sha:
+            continue
+        f = Fetch(fetched_at, url, resp.status, sha, len(body), f"{RAW}/{sha}.{fmt.ext}")
+        new.append((f, body))
+        fetches.append((f, body))
     built = build(cfg, fetches)
     files = ((OBSERVATIONS, built.observations), (GAPS, built.gaps), (MANIFEST, built.manifest))
+    sha = " ".join(_sha(resp.body) for _, _, resp in got)
     result = FetchResult(
         cfg.id, "updated", sha, built.rows, built.gap_rows, built.revised, _sha(built.manifest)
     )
-    if new is None and all(
+    if not new and all(
         (sdir / name).is_file() and (sdir / name).read_bytes() == data for name, data in files
     ):
         result.status = "unchanged"
         return result
 
-    if new is not None:
-        raw_path = sdir / new.raw
+    for f, body in new:
+        raw_path = sdir / f.raw
         if not raw_path.exists():
             _write_atomic(raw_path, body)
         with (sdir / FETCHES).open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(new.as_json(), sort_keys=True) + "\n")
+            fh.write(json.dumps(f.as_json(), sort_keys=True) + "\n")
     for name, data in files:
         _write_atomic(sdir / name, data)
     return result
