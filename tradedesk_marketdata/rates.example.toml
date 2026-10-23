@@ -24,9 +24,12 @@
 #                      for every dimension of the flow (one series)
 #                bundesbank Deutsche Bundesbank SDMX-CSV; key = "{flow}/{series key}",
 #                      a code for every dimension of the flow (one series)
+#                mof   Ministry of Finance Japan JGB interest-rate CSV (two files:
+#                      all dates, then the current month); key = the tenor column ("5Y")
 #   key      = the source's own code for the series (required; shape as above)
 #   url      = a URL to use instead of the format's default (optional); a file: URL
-#              (file:///path/to/workbook.xlsx) reads a file downloaded by hand
+#              (file:///path/to/workbook.xlsx) reads a file downloaded by hand; for mof,
+#              a list of two URLs: ["<all-dates file>", "<current-month file>"]
 #   unit     = the unit, for a source that states none (fred, boe, snb, swea,
 #              swestr); a unit the source states wins, and a different one
 #              here is an error (optional)
@@ -35,7 +38,7 @@
 #              listed in gaps.csv, never filled
 #   start    = YYYY-MM-DD, the first date to ask for, where the format allows it
 #              (optional; boe asks from 1950-01-01, swea and swestr from
-#              1900-01-01 by default; rba-xls and rbnz read the whole workbook
+#              1900-01-01 by default; rba-xls, rbnz and mof read whole files
 #              and drop the rows dated before start)
 
 [[series]]

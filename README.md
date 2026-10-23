@@ -894,6 +894,7 @@ series):
 | `swestr` | Sveriges Riksbank SWESTR API, JSON | the SWESTR id |
 | `norges` | Norges Bank SDMX data API, SDMX-CSV (`format=sdmx-csv&labels=id`) | `{flow}/{series key}`, one series: a code for every dimension of the flow (no wildcard, no `+`, no short key) |
 | `bundesbank` | Deutsche Bundesbank time-series database, SDMX web service (`api.statistiken.bundesbank.de`), SDMX-CSV (`format=sdmx_csv&lang=en`) | `{flow}/{series key}`, one series: a code for every dimension of the flow (no empty part, no `+`, no `*`, no short key) |
+| `mof` | Ministry of Finance Japan, JGB interest rates, the English CSV files (two files: all dates, and the current month) | the tenor column, for example `5Y` |
 
 The workbook formats read the publisher's table layout: `rba-xls` the same
 metadata rows as the RBA CSV (`Frequency`, `Units`, `Publication date`,
@@ -934,6 +935,40 @@ for commercial use, on the condition that the source is quoted and the
 statistics (including metadata) are not modified; third-party data need the
 originator's permission. The store keeps the source's values unchanged.
 
+**Two files: `mof`.** The Ministry of Finance Japan publishes its JGB
+interest rates as a wide table, one column per tenor, in two files: the
+all-dates file (`.../interest_rate/historical/jgbcme_all.csv`, up to the end
+of the last month) and the current-month file (`.../interest_rate/jgbcme.csv`).
+Each has a title line (`Interest Rate`, or `Interest Rate (<Month> <YYYY>)` for
+the current month, with `(Unit : %)` in a later cell), a `Date,<tenor>,...`
+header, one row per day with a `YYYY/M/D` date and `-` for no value, and a
+trailer after an empty row. The files are cp932 (Shift_JIS) text; the raw
+file keeps the bytes unchanged. The `key` is the tenor column, so each tenor
+is its own series. One fetch downloads both files, in that order, and parses
+each before anything is written. The files must join without overlap or gap:
+the current-month file starts after the all-dates file's last date and is for
+the next calendar month; the dates of the current-month file must be in the
+month its title names; and the joined rows must be daily by their dates.
+Otherwise the fetch is refused and writes nothing (on the day the publisher
+rolls a month into the all-dates file, fetch again after both files have
+changed). Each file is kept as its own raw file and `_fetches.jsonl` line; a
+file whose bytes equal the latest kept file from the same URL adds no line.
+The rebuild joins them as for any later fetch: a new all-dates file wins for
+the dates it lists, so it replaces the last month's current-month rows (a
+changed value is `revised`). In the all-dates file, the rows before the
+tenor's first value are not read: the tenor was not issued then, so they are
+not gaps. `start` drops the rows dated before it in both files, and must be a
+date before the current month. To set the URLs, `url` is a list of the two,
+all-dates first:
+
+```toml
+[[series]]
+id = "EXAMPLE-MOF"
+source = "mof"
+key = "5Y"
+url = ["file:///home/me/downloads/jgbcme_all.csv", "file:///home/me/downloads/jgbcme.csv"]
+```
+
 **A local file.** `url` may be a `file:` URL, for a publisher that refuses
 scripted downloads (the RBNZ site does from some networks). Download the
 workbook in a browser and name it in the configuration:
@@ -957,15 +992,17 @@ allows it). Only daily series are accepted: a download whose dates or stated
 frequency are not daily is refused, and the refusal names the source and the
 series key. A format that states no frequency (`fred`, `boe`, `rbnz`, `snb`,
 `swea`, `swestr`, a `boc` series without a `dateFormat`, a `bundesbank` flow
-without a frequency dimension, or an `rba` or `rba-xls` column without a
-`Frequency` row) is judged by its dates: the median
+without a frequency dimension, an `rba` or `rba-xls` column without a
+`Frequency` row, or the two `mof` files joined) is judged by its dates: the median
 step between dated rows must be 4 days or fewer (a weekend plus a holiday),
 and one dated row is not enough to tell; an `snb` date that is not a day
 (`YYYY-MM`) is refused at once. A download that states a daily frequency
 (`ecb`, `boj`, `norges` `FREQ` `B` or `D`, `bundesbank` frequency dimension
 `B` or `D`, `boc` `dateFormat` `daily`, or an
 `rba` or `rba-xls` column with `Frequency` `Daily`) is accepted with one dated
-row. A weekly or monthly series is refused before anything is written.
+row. Each `mof` file alone is the publisher's daily table, so a current-month
+file with one dated row is read; the join of the two files is judged by its
+dates. A weekly or monthly series is refused before anything is written.
 
 ### The store layout
 
@@ -987,7 +1024,7 @@ directories that start with `_`, so they do not see this area.
   `Publication date`; `rbnz`: the `Published Date`; `snb`: the cube's
   `PublishingDate`; `swestr`: the UTC date of each day's `publicationTime`).
   It is empty when the source states none (`fred`, `ecb`, `boe`, `boc`,
-  `swea`, `norges`, `bundesbank`); the fetch
+  `swea`, `norges`, `bundesbank`, `mof`); the fetch
   time in `_fetches.jsonl` is then the only time on record.
 - **`revised`** is `true` when an earlier fetch held another value for the
   date.
@@ -995,7 +1032,7 @@ directories that start with `_`, so they do not see this area.
   `calendar`) between the first and last observation that has no value, and
   each row the source lists without a value. The reasons are
   `missing_in_source` (the source lists the date with no value: an empty
-  cell, `.`, `NaN`, `null`, a JSON `null`, a workbook error cell such as
+  cell, `.`, `NaN`, `null`, a `mof` `-`, a JSON `null`, a workbook error cell such as
   `#N/A`, a `boc` observation without the series, or an `OBS_STATUS` of `M`),
   `no_row` (the source
   does not list the date) and `withdrawn` (an earlier fetch had a value, the
