@@ -1316,15 +1316,19 @@ def _check_daily(rows: dict[date, Row], cfg: SeriesConfig) -> None:
         )
 
 
-def parse(body: bytes, cfg: SeriesConfig) -> dict[date, Row]:
+def parse(body: bytes, cfg: SeriesConfig, *, need_value: bool = True) -> dict[date, Row]:
     """The dated rows of one download. Raises :class:`RatesError` when it does not parse.
 
     A download that states no daily frequency must be daily by its dates
     (:func:`_check_daily`), so it cannot let a weekly or monthly series in. One that
     states a daily frequency is daily, even with one dated row.
+
+    With ``need_value`` False, a download with dated rows but no value parses: one file
+    of a multi-file format (a current-month file before its first value) is judged with
+    the other files of its fetch, and those must hold a value.
     """
     rows, daily_stated = FORMATS[cfg.source].parse(body, cfg)
-    if not any(r.value is not None for r in rows.values()):
+    if (need_value or not rows) and not any(r.value is not None for r in rows.values()):
         raise RatesError(f"{cfg.source}: the download holds no value")
     if not daily_stated:
         _check_daily(rows, cfg)
@@ -1402,8 +1406,9 @@ def build(cfg: SeriesConfig, fetches: Sequence[tuple[Fetch, bytes]]) -> Built:
     merged: dict[date, Row] = {}
     seen: dict[date, set[str]] = {}
     marked_missing: set[date] = set()
+    single = FORMATS[cfg.source].files == 1
     for _, body in fetches:
-        rows = parse(body, cfg)
+        rows = parse(body, cfg, need_value=single)
         lo, hi = min(rows), max(rows)
         for d in [d for d in merged if lo <= d <= hi and d not in rows]:
             del merged[d]
@@ -1645,7 +1650,8 @@ def fetch_series(
 
     Every earlier raw file is checked against its sha256 and the new body is parsed
     before anything is written. A multi-file format downloads and parses each of its
-    files, in order, and its join check passes, before anything is written; each body is
+    files, in order, and its join check passes, before anything is written; one file may
+    hold dated rows with no value, but the files together must hold a value. Each body is
     kept as its own raw file and fetch line. The series' source and key must match the stored
     manifest's: another series cannot be written under the same id.
     """
@@ -1659,11 +1665,15 @@ def fetch_series(
     prior = [(f, _read_raw(sdir, f)) for f in read_fetches(sdir)]
     fmt = FORMATS[cfg.source]
     got: list[tuple[str, str, Response]] = []
+    values = False
     for url in cfg.resolved_urls():
         fetched_at = now()
         resp = (get or download)(url)
-        parse(resp.body, cfg)
+        rows = parse(resp.body, cfg, need_value=fmt.files == 1)
+        values = values or any(row.value is not None for row in rows.values())
         got.append((url, fetched_at, resp))
+    if not values:
+        raise RatesError(f"{cfg.source}: the downloads hold no value")
     if fmt.join is not None:
         fmt.join([resp.body for _, _, resp in got], cfg)
 
