@@ -1,0 +1,6 @@
+Synthetic release schedule (made-up values)
+Day;Time;Zone;Release;Kind
+05/01/2024;08:30;;Synthetic Jobs Report;jobs
+11/01/2024;10:00;America/Chicago;Synthetic  Price Index;prices
+
+31/01/2024;;;Synthetic Survey;survey
