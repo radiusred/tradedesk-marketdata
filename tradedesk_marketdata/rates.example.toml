@@ -22,6 +22,8 @@
 #                swestr Riksbank SWESTR API JSON; key = the SWESTR id
 #                norges Norges Bank SDMX-CSV;     key = "{flow}/{series key}", a code
 #                      for every dimension of the flow (one series)
+#                bundesbank Deutsche Bundesbank SDMX-CSV; key = "{flow}/{series key}",
+#                      a code for every dimension of the flow (one series)
 #   key      = the source's own code for the series (required; shape as above)
 #   url      = a URL to use instead of the format's default (optional); a file: URL
 #              (file:///path/to/workbook.xlsx) reads a file downloaded by hand
