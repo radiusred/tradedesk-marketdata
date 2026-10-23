@@ -399,7 +399,7 @@ def _time_text(t: datetime) -> str:
 # folded (a line break and one space or tab); text values escape "\", ";", "," and new
 # lines. VALARM components inside an event and VTIMEZONE components are skipped.
 
-_ICS_FOLD = re.compile(r"\r?\n[ \t]")
+_ICS_FOLD = re.compile(rb"\r?\n[ \t]")
 _ICS_DATE = re.compile(r"^\d{8}$")
 _ICS_TIME = re.compile(r"^(\d{8}T\d{6})(Z?)$")
 _ICS_UNESCAPE = re.compile(r"\\([\\;,nN])")
@@ -480,11 +480,12 @@ def _ics_event(
 
 
 def _ics_parse(body: bytes, cfg: CalendarConfig) -> list[Event]:
+    # RFC 5545 §3.1: unfold the octets before decoding, as a fold can split a UTF-8 character.
     try:
-        text = body.decode("utf-8-sig")
+        text = _ICS_FOLD.sub(b"", body).decode("utf-8-sig")
     except UnicodeDecodeError as e:
         raise CalendarError(f"ics: the download is not UTF-8 text ({e})") from None
-    lines = _ICS_FOLD.sub("", text).splitlines()
+    lines = text.splitlines()
     if not lines or lines[0].strip().upper() != "BEGIN:VCALENDAR":
         raise CalendarError("ics: the download does not start with BEGIN:VCALENDAR")
     events: list[Event] = []

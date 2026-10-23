@@ -154,6 +154,21 @@ def test_ics_quoted_parameters_and_unescaping():
     )
 
 
+def test_ics_unfolds_a_line_folded_inside_a_utf8_character(tmp_path):
+    # RFC 5545 §3.1: the fold splits the two octets of "é"; unfolding restores them.
+    body = (
+        b"BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nDTSTART:20240105T100000Z\r\n"
+        b"SUMMARY:Synthetic Policy Decision caf\xc3\r\n \xa9\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+    (e,) = cal.parse(body, ICS).events.values()
+    assert (e.title, e.type) == ("Synthetic Policy Decision café", "policy_decision")
+    fetch(tmp_path, ICS, {ICS_URL: body})
+    (r,) = rows(cdir(tmp_path, "SYN-ICS") / "events.csv")
+    assert r["title"] == "Synthetic Policy Decision café"
+    rep = cal.verify_calendar(tmp_path, "SYN-ICS")
+    assert (rep.findings, rep.warnings, rep.fetches) == ([], [], 1)
+
+
 @pytest.mark.parametrize(
     "body, match",
     [
