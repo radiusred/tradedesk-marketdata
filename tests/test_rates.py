@@ -1,4 +1,5 @@
-"""tradedesk-md-rates (M27-R1, M29-R1): central-bank daily rate series in the reference-data area.
+"""tradedesk-md-rates (M27-R1, M29-R1, M34-R1): central-bank daily rate series in the
+reference-data area.
 
 Every fixture is labelled synthetic data (``tests/fixtures/rates/README.md``): the shapes
 of the public formats with made-up series codes and values. Downloads are stubbed; no test
@@ -33,6 +34,7 @@ CONFIGS = {
     "swea": r.SeriesConfig("SYN-SWEA", "swea", "SYNTHSWEA", unit="percent"),
     "swestr": r.SeriesConfig("SYN-SWESTR", "swestr", "SYNTHSWESTR", unit="percent"),
     "norges": r.SeriesConfig("SYN-NORGES", "norges", "SYN/B.SYNTH.SD.R"),
+    "bundesbank": r.SeriesConfig("SYN-BUNDESBANK", "bundesbank", "SYN/D.SYNTH.R10"),
 }
 
 D1, D2, D3, D4, D5 = (date(2024, 1, d) for d in range(1, 6))
@@ -71,6 +73,7 @@ def csv_rows(path: Path) -> list[list[str]]:
         ("boc", "Percent", None),
         ("swea", None, None),
         ("norges", "R", None),
+        ("bundesbank", "Prozent", None),
     ],
 )
 def test_each_format_parses_its_synthetic_fixture(fmt, unit, published):
@@ -176,6 +179,19 @@ def test_rba_picks_the_column_by_series_id_and_a_short_row_has_no_value():
             "series 'B.SYNTH.OTHER.R', not 'B.SYNTH.SD.R'",
         ),
         ("norges", fixture("norges").replace(b"NB:SYN(1.0)", b"NB:OTHER(1.0)", 1), "not flow"),
+        (
+            "bundesbank",
+            fixture("bundesbank").replace(b",D,SYNTH,R10,2024-01-04", b",D,SYNTH,R05,2024-01-04"),
+            "series 'D.SYNTH.R05', not 'D.SYNTH.R10'",
+        ),
+        (
+            "bundesbank",
+            fixture("bundesbank").replace(b"BBK:SYN(1.0)", b"BBK:OTHER(1.0)", 1),
+            "not flow 'SYN'",
+        ),
+        ("bundesbank", b'{"status":404,"title":"no results"}', "header lacks"),
+        ("bundesbank", fixture("bundesbank").replace(b",2.35,", b",n/a,"), "not a decimal"),
+        ("bundesbank", fixture("bundesbank").replace(b"2024-01-05,", b"2024-01-02,"), "more than"),
     ],
 )
 def test_a_download_that_does_not_parse_is_refused(fmt, body, message):
@@ -209,6 +225,11 @@ def test_a_download_that_does_not_parse_is_refused(fmt, body, message):
             "https://data.norges-bank.no/api/data/SYN/B.SYNTH.SD.R?format=sdmx-csv&labels=id",
         ),
         (
+            CONFIGS["bundesbank"],
+            "https://api.statistiken.bundesbank.de/rest/data/SYN/D.SYNTH.R10"
+            "?format=sdmx_csv&lang=en",
+        ),
+        (
             r.SeriesConfig("X", "fred", "K", url="https://example.test/x.csv"),
             "https://example.test/x.csv",
         ),
@@ -227,6 +248,7 @@ def test_each_format_addresses_its_series(cfg, url):
         ("swea", "/SYNTHSWEA/2024-01-01"),
         ("swestr", "?fromDate=2024-01-01"),
         ("norges", "&startPeriod=2024-01-01"),
+        ("bundesbank", "&startPeriod=2024-01-01"),
     ],
 )
 def test_the_url_asks_from_the_configured_start(fmt, part):
@@ -243,6 +265,11 @@ def test_the_url_asks_from_the_configured_start(fmt, part):
         ("snb", "synthcube/SYNTH1", "one item per dimension"),
         ("norges", "SYN/B..SD.R", "names one series"),
         ("norges", "SYN/B.SYNTH+OTHER.SD.R", "names one series"),
+        ("bundesbank", "SYN", "'flow/series key'"),
+        ("bundesbank", "SYN/D..R10", "names one series"),
+        ("bundesbank", "SYN/D.SYNTH.", "names one series"),
+        ("bundesbank", "SYN/D.SYNTH+OTHER.R10", "names one series"),
+        ("bundesbank", "SYN/D.*.R10", "names one series"),
         ("boc", "SYNTH/SERIES", "series id"),
         ("swea", "SYNTH SERIES", "series id"),
         ("swestr", "../SYNTH", "series id"),
@@ -445,6 +472,16 @@ MONTHLY_SNB = (
             fixture("norges").replace(b",I,B,", b",I,M,"),
             "frequency 'M' is not daily",
         ),
+        (
+            "bundesbank",
+            fixture("bundesbank").replace(b"(1.0),D,", b"(1.0),M,"),
+            "frequency 'M' is not daily",
+        ),
+        (
+            "bundesbank",
+            fixture("bundesbank").replace(b",P1D,", b",P1M,"),
+            "time format 'P1M' is not daily",
+        ),
         ("swea", WEEKLY_SWEA, "median 7 days apart"),
         ("fred", MONTHLY_FRED, r"median 3\d days apart"),
     ],
@@ -469,6 +506,43 @@ def test_a_norges_download_that_mixes_tenors_on_distinct_dates_is_not_stored(tmp
     assert not any(tmp_path.iterdir())
 
 
+@pytest.mark.parametrize("key", ["SYN/D.SYNTH", "SYN/D.SYNTH.R10.X"])
+def test_a_bundesbank_key_must_name_every_dimension_of_the_flow(key):
+    cfg = dataclasses.replace(CONFIGS["bundesbank"], key=key)
+    with pytest.raises(r.RatesError, match="flow 'SYN' has 3 dimensions"):
+        r.parse(fixture("bundesbank"), cfg)
+
+
+def test_a_bundesbank_series_s_unpublished_days_are_gaps_never_filled(tmp_path):
+    # The service lists a weekend or holiday with OBS_VALUE "." (OBS_STATUS "K"): a gap
+    # missing_in_source, like every row a source lists without a value.
+    weekend = b'BBK:SYN(1.0),D,SYNTH,R10,2024-01-06,.,P1D,2,SYN.D.SYNTH.R10,Prozent,0,"x",K\n'
+    monday = b'BBK:SYN(1.0),D,SYNTH,R10,2024-01-08,2.42,P1D,2,SYN.D.SYNTH.R10,Prozent,0,"x",\n'
+    fetch(tmp_path, CONFIGS["bundesbank"], fixture("bundesbank") + weekend + monday)
+    sdir = tmp_path / "_reference/rates/SYN-BUNDESBANK"
+    assert csv_rows(sdir / "observations.csv") == [
+        ["2024-01-02", "2.31", "Prozent", "", "false"],
+        ["2024-01-04", "2.35", "Prozent", "", "false"],
+        ["2024-01-05", "2.40", "Prozent", "", "false"],
+        ["2024-01-08", "2.42", "Prozent", "", "false"],
+    ]
+    assert csv_rows(sdir / "gaps.csv") == [
+        ["2024-01-01", "missing_in_source"],
+        ["2024-01-03", "no_row"],
+        ["2024-01-06", "missing_in_source"],
+    ]
+    assert not r.verify_series(tmp_path, "SYN-BUNDESBANK").failed
+
+
+def test_a_bundesbank_flow_without_a_frequency_dimension_is_judged_by_its_dates():
+    body = fixture("bundesbank").replace(b"BBK_STD_FREQ,", b"SYN_KIND,")
+    assert r.parse(body, CONFIGS["bundesbank"]) == r.parse(
+        fixture("bundesbank"), CONFIGS["bundesbank"]
+    )
+    with pytest.raises(r.RatesError, match="one dated row"):
+        r.parse(_one_dated_row(body, b"DATAFLOW,"), CONFIGS["bundesbank"])
+
+
 def test_a_boc_series_without_a_date_format_is_judged_by_its_dates():
     body = fixture("boc").replace(b'"dateFormat": "daily",', b"")
     assert r.parse(body, CONFIGS["boc"]) == r.parse(fixture("boc"), CONFIGS["boc"])
@@ -479,7 +553,8 @@ def test_a_boc_series_without_a_date_format_is_judged_by_its_dates():
 
 
 @pytest.mark.parametrize(
-    "fmt, ext", [("snb", "csv"), ("norges", "csv"), ("boc", "json"), ("swea", "json")]
+    "fmt, ext",
+    [("snb", "csv"), ("norges", "csv"), ("bundesbank", "csv"), ("boc", "json"), ("swea", "json")],
 )
 def test_the_raw_file_keeps_the_format_s_extension(tmp_path, fmt, ext):
     fetch(tmp_path, CONFIGS[fmt], fixture(fmt))
@@ -524,6 +599,7 @@ def _one_dated_row(body: bytes, header: bytes) -> bytes:
         ("boj", b"SERIES_CODE,"),
         ("rba", b"Series ID,"),
         ("norges", b"STRUCTURE,"),
+        ("bundesbank", b"DATAFLOW,"),
     ],
 )
 def test_a_stated_daily_series_with_one_dated_row_is_accepted(fmt, header):

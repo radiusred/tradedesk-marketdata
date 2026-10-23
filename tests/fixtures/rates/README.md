@@ -5,7 +5,8 @@ public source's published format (FRED, ECB Data Portal, Bank of England
 database, Bank of Japan time-series API, RBA statistical table as CSV and as an
 `.xls` workbook, RBNZ statistical table as an `.xlsx` workbook, SNB data
 portal cube CSV, Bank of Canada Valet JSON, Riksbank SWEA and SWESTR JSON,
-Norges Bank SDMX-CSV), but the series and cube codes (`SYNTH...`, `synthcube`,
+Norges Bank SDMX-CSV, Deutsche Bundesbank SDMX-CSV with a byte-order mark),
+but the series and cube codes (`SYNTH...`, `synthcube`,
 `SYN`) and every value are made up. They are not real
 publications and they name no real series.
 
