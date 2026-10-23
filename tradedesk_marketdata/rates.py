@@ -1413,11 +1413,14 @@ def download(
     *,
     timeout: tuple[float, float] = (DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT),
     retries: int = DEFAULT_RETRIES,
+    user_agent: str | None = None,
 ) -> Response:
     """GET one URL with the package's backoff. Raises :class:`RatesError` after ``retries``.
 
     A ``file:`` URL reads a local file instead: a publisher's file that a person
     downloaded, for a site that refuses scripted requests. It has no HTTP status.
+    ``user_agent`` replaces the package's User-Agent header for this request: some
+    publishers ask a script to name a contact in it.
     """
     if urlparse(url).scheme == "file":
         path = Path(url2pathname(urlparse(url).path))
@@ -1430,7 +1433,12 @@ def download(
     for attempt in range(1, retries + 1):
         check_cancelled()
         try:
-            with _SESSION.get(url, timeout=timeout) as r:
+            reply = (
+                _SESSION.get(url, timeout=timeout, headers={"User-Agent": user_agent})
+                if user_agent
+                else _SESSION.get(url, timeout=timeout)
+            )
+            with reply as r:
                 r.raise_for_status()
                 return Response(r.status_code, r.content)
         except Exception as e:
