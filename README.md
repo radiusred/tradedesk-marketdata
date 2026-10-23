@@ -1124,6 +1124,137 @@ on a usage error, including a configuration that is not valid.
 
 ---
 
+## Reference data: release calendars (`tradedesk-md-calendars`)
+
+`tradedesk-md-calendars` fetches publishers' release calendars (dated events
+such as a policy decision or a statistics release) into the same
+reference-data area as the rate and dividend series, and verifies that the
+kept raw downloads reproduce the parsed calendar. It works like
+`tradedesk-md-rates`: the same raw files, fetch log, manifest, `unchanged`
+and `verify`.
+
+Before the first fetch, create `my-calendars.toml`. Copy
+`tradedesk_marketdata/calendars.example.toml`, keep only the calendars you
+need, and replace its placeholder URLs with real ones (see
+[The calendars to fetch](#the-calendars-to-fetch---config)). Without this
+file, `fetch` exits with status 2. The store directory must already exist:
+
+```bash
+cp tradedesk_marketdata/calendars.example.toml my-calendars.toml  # in a checkout; then edit it
+mkdir -p ./cache
+tradedesk-md-calendars fetch --store ./cache --config my-calendars.toml
+tradedesk-md-calendars verify --store ./cache
+```
+
+### Terms of use
+
+The package ships no list of publishers and no preset for one. Read each
+publisher's terms of use before you keep its calendar, and keep it only
+where they permit both a stored copy and a scripted download. Some
+publishers permit scripted access only when the request names a contact:
+`fetch --user-agent TEXT` replaces the package's User-Agent header
+(`tradedesk-marketdata/<version>`) for every download of the run. For a site
+that refuses scripted requests, download the file by hand and give its
+`file:` URL; the fetch line then has no HTTP status.
+
+### The calendars to fetch (`--config`)
+
+You name the calendars in a TOML file of `[[calendar]]` tables;
+`tradedesk_marketdata/calendars.example.toml` documents every key. Each table
+has:
+
+| Key | Content |
+|---|---|
+| `id` | the calendar's directory name in the store (required) |
+| `institution` | the publisher, written in every row of `events.csv` (required) |
+| `timezone` | an IANA time-zone name (required): the zone of an event whose source states none |
+| `source` | the format (required): `ics` or `csv`, below |
+| `url` | the file to download (required) |
+| `pages` | publisher pages to keep raw beside the file (optional) |
+| `tzids` | (`ics` only) a table that maps the file's own `TZID` names to IANA names, for example `"Example-Eastern" = "America/New_York"` (optional) |
+| `type`, `[[calendar.types]]` or `type_column` | the event type: exactly one of them, below |
+
+| `source` | Reads |
+|---|---|
+| `ics` | an iCalendar (RFC 5545) file that the publisher offers. Each `VEVENT` with a `DTSTART` and a `SUMMARY` (the title) is one event. Folded lines are joined and escaped text is unescaped. `STATUS:CANCELLED` events are not listed. An event with `RRULE` or `RDATE` is refused: the tool does not expand a recurrence, so a calendar must list each date. |
+| `csv` | a curated file: a person writes the events from the publisher's pages into a delimited file with a header row. The options `date_column`, `title_column` (required), `time_column`, `timezone_column`, `type_column`, `date_format` (default `%Y-%m-%d`), `time_format` (default `%H:%M`), `encoding` (default `utf-8-sig`), `delimiter` (default `,`) and `skip_lines` (default 0) name its columns. Name the pages the file was written from in `pages`, so their raw copies are kept with it. |
+
+The event type is one of:
+
+- `type = "..."`: one type for every event.
+- `[[calendar.types]]` tables, each with a `type` and a `match` (a regular
+  expression searched for in the title). The first rule that matches wins.
+  An event that no rule matches is not kept; the manifest counts them
+  (`events.unmatched`).
+- `type_column` (`csv` only): the column that holds each event's type.
+
+A type, like an id, is letters, digits, `.`, `_` and `-`.
+
+### The store layout
+
+Each calendar lives in `{store}/_reference/calendars/{id}/`, beside
+`_reference/rates/` and `_reference/dividends/`. The candle tools skip
+directories that start with `_`.
+
+| File | Content |
+|---|---|
+| `_raw/{sha256}.{ext}` | every downloaded body, kept unchanged under its sha256; never deleted. The events file is `.ics` or `.csv`; a page takes its URL's extension when it is a known one, else `.html` or `.pdf` from its first bytes, else `.bin` |
+| `_fetches.jsonl` | one line per kept download: `fetched_at` (UTC), `url`, `http_status` (`null` for a `file:` URL), `sha256`, `bytes`, `raw`, `input` (`events` for the parsed file, `page` for a kept page) |
+| `events.csv` | `date,time,timezone,institution,type,title,source_url,raw_sha256,revised`, one row per event, sorted by date, time, type and title |
+| `withdrawn.csv` | `date,time,timezone,type,title,listed_sha256,dropped_sha256`: the events that a later download no longer lists |
+| `manifest.json` | the configuration, the parser and its version, every fetch, and the sha256, row count and span of `events.csv` (with its `revised` and `unmatched` counts) and of `withdrawn.csv` |
+
+- **`time`** is `HH:MM` (`HH:MM:SS` when the seconds are not zero), as the
+  source states it. It is empty when the source states no time of day (an
+  all-day iCalendar event, an empty csv cell).
+- **`timezone`** is the IANA zone of the date and time: the `TZID` of an
+  iCalendar time (through `tzids` when the file uses its own name), `UTC`
+  for an iCalendar time that ends in `Z`, the row's zone for a csv
+  `timezone_column`, else the calendar's `timezone`. A `TZID` that is not an
+  IANA name and is not in `tzids` is refused. The tool does not convert a
+  time to another zone.
+- **`title`** is the source's title with its white space collapsed.
+- **`source_url`** and **`raw_sha256`** name the download the row was last
+  read from: its URL and the sha256 of its raw file in `_raw/`.
+- **`revised`** is `true` when an earlier download gave the event another
+  time or zone.
+
+An event's identity is its date, type and title. Two listings of the same
+event in one download are one event when they give the same time and zone;
+otherwise the download is refused.
+
+**The merge rule.** The events files merge in the order of their fetches.
+A later file wins for the dates of its span (its first to its last listed
+date, including events that no type rule matches). An event an earlier file
+listed, inside that span but not in the later file, moves to
+`withdrawn.csv`, with the sha256 of the last file that listed it and of the
+file that dropped it; when a later file lists it again, it leaves
+`withdrawn.csv`. Events outside the later file's span keep their rows, so a
+publisher page that shows only the coming year does not remove the past.
+
+A fetch downloads the events file and then each page. The events file is
+parsed before anything is written; a download that does not parse, or that
+holds no event, writes nothing. A body equal to the latest kept body of the
+same input (for a page: of the same URL) adds no line, and a fetch that
+changes no file reports `unchanged`. The calendar's configuration (all but
+its `url` and `pages`) must match the stored manifest's: another calendar
+cannot be written under the same id.
+
+Only `tradedesk-md-calendars` writes this area.
+
+### Verifying (`verify`)
+
+As for the rate series: `tradedesk-md-calendars verify` re-hashes each raw
+file, rebuilds `events.csv`, `withdrawn.csv` and `manifest.json` from the raw
+files and compares them byte for byte. It writes nothing, and it warns about
+a raw file with no fetch line. Both commands take `--format text|json` and
+select calendars with `--calendar ID ...`. The exit status is that of the
+other reference-data tools: `0` when every calendar fetched or verified; `1`
+when a calendar failed; `2` on a usage error, including a configuration that
+is not valid.
+
+---
+
 ## Data-quality audit scripts
 
 The repository also ships four maintainer-oriented audit scripts under
