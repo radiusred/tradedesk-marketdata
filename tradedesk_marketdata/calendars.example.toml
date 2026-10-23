@@ -1,0 +1,68 @@
+# An EXAMPLE configuration for `tradedesk-md-calendars fetch --config`.
+#
+# This package ships no list of publishers. Copy this file, replace the example
+# tables with the calendars you need and pass the copy with --config. Read each
+# publisher's terms of use first: keep a calendar only where they allow it,
+# including its scripted download.
+#
+# One [[calendar]] table per calendar:
+#
+#   id          = the calendar's name in the store: {store}/_reference/calendars/{id}/
+#                 (letters, digits, '.', '_' and '-'; required)
+#   institution = the publisher, written in every row of events.csv (required)
+#   timezone    = an IANA time zone name (required): the zone of an event whose
+#                 source states none (an all-day or a floating iCalendar event,
+#                 a csv row without a zone)
+#   source      = the format (required):
+#                   ics  an iCalendar (RFC 5545) file that the publisher offers
+#                   csv  a curated file: a person writes the events from the
+#                        publisher's pages; the options below name the columns
+#   url         = the file to download (required; a file: URL reads a local file)
+#   pages       = the publisher pages to keep raw beside the file (optional):
+#                 for a curated csv, the pages its events were written from
+#   tzids       = (ics only, optional) a table that maps the file's own TZID
+#                 names to IANA names; a TZID that is neither is refused
+#
+# The event type, exactly one of:
+#
+#   type        = one type for every event
+#   [[calendar.types]] tables, in order, each with
+#     type      = the type
+#     match     = a regular expression searched for in the event's title; the
+#                 first rule that matches wins, and an event that no rule
+#                 matches is not kept (the manifest counts them)
+#   type_column = (csv only) the column that holds each event's type
+#
+# A type is letters, digits, '.', '_' and '-'.
+#
+# csv options: date_column, title_column (required); time_column (an empty cell
+# means no time of day); timezone_column (an empty cell means `timezone`);
+# type_column; date_format (strptime, default "%Y-%m-%d"); time_format (default
+# "%H:%M"); encoding (default "utf-8-sig"); delimiter (default ","); skip_lines
+# (lines before the header, default 0).
+
+[[calendar]]
+id = "EXAMPLE-ICS"
+institution = "Example Central Bank"
+timezone = "Europe/London"
+source = "ics"
+url = "https://example.invalid/calendar.ics"
+tzids = { "Example-Standard-Time" = "Europe/London" }
+[[calendar.types]]
+type = "policy_decision"
+match = "(?i)policy decision"
+[[calendar.types]]
+type = "minutes"
+match = "(?i)minutes"
+
+[[calendar]]
+id = "EXAMPLE-CSV"
+institution = "Example Statistics Office"
+timezone = "America/New_York"
+source = "csv"
+url = "file:///path/to/example-releases.csv"
+pages = ["https://example.invalid/release-schedule"]
+date_column = "Date"
+time_column = "Time"
+title_column = "Release"
+type = "statistics_release"
