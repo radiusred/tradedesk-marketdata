@@ -1053,6 +1053,73 @@ def _norges_parse(body: bytes, cfg: SeriesConfig) -> tuple[dict[date, Row], bool
     return rows, True
 
 
+# Deutsche Bundesbank time-series database, SDMX web service:
+# rest/data/{flow}/{series key}?format=sdmx_csv&lang=en, SDMX-CSV 1.0: DATAFLOW
+# ("BBK:{flow}(version)"), then the flow's dimensions (the frequency first, BBK_STD_FREQ),
+# TIME_PERIOD, OBS_VALUE and the attributes (TIME_FORMAT "P1D", BBK_UNIT, OBS_STATUS).
+# A day without a value is listed with OBS_VALUE ".". The API reads an empty key part as
+# a wildcard and "+" as a list, so the key must name one code for every dimension.
+
+
+def _bundesbank_key(cfg: SeriesConfig) -> tuple[str, list[str]]:
+    flow, series = _split_key(cfg, "flow", "series key")
+    parts = series.split(".")
+    if any(not p or "+" in p or "*" in p for p in parts):
+        raise RatesError(f"{cfg.id}: a bundesbank series key names one series, not {series!r}")
+    return flow, parts
+
+
+def _bundesbank_url(cfg: SeriesConfig) -> str:
+    flow, series = _split_key(cfg, "flow", "series key")
+    url = f"https://api.statistiken.bundesbank.de/rest/data/{quote(flow)}/{quote(series)}"
+    url += "?format=sdmx_csv&lang=en"
+    if cfg.start:
+        url += f"&startPeriod={cfg.start.isoformat()}"
+    return url
+
+
+def _bundesbank_check(cfg: SeriesConfig) -> None:
+    _bundesbank_key(cfg)
+
+
+def _bundesbank_parse(body: bytes, cfg: SeriesConfig) -> tuple[dict[date, Row], bool]:
+    flow, parts = _bundesbank_key(cfg)
+    reader = csv.DictReader(io.StringIO(_text(body)))
+    head = reader.fieldnames or []
+    need = ["DATAFLOW", "TIME_PERIOD", "OBS_VALUE"]
+    if not set(need) <= set(head) or head.index("DATAFLOW") != 0:
+        raise RatesError(f"bundesbank: the header lacks {', '.join(need)} in SDMX-CSV order")
+    dims = head[1 : head.index("TIME_PERIOD")]
+    if len(dims) != len(parts):
+        raise RatesError(
+            f"bundesbank series {cfg.key!r}: the key has {len(parts)} parts, "
+            f"flow {flow!r} has {len(dims)} dimensions ({'.'.join(dims)})"
+        )
+    freq = next((c for c in dims if c == "FREQ" or c.endswith("_FREQ")), None)
+    rows: dict[date, Row] = {}
+    for n, rec in enumerate(reader, 2):
+        where = f"bundesbank line {n}"
+        m = _SDMX_FLOW.match(rec["DATAFLOW"] or "")
+        if not m or m.group(1) != flow:
+            raise RatesError(f"{where}: dataflow {rec['DATAFLOW']!r}, not flow {flow!r}")
+        if freq is not None and rec[freq] not in ("B", "D"):
+            raise RatesError(
+                f"bundesbank series {cfg.key!r}: frequency {rec[freq]!r} is not daily (B or D)"
+            )
+        if rec.get("TIME_FORMAT") not in (None, "", "P1D"):
+            raise RatesError(
+                f"bundesbank series {cfg.key!r}: time format {rec['TIME_FORMAT']!r} "
+                "is not daily (P1D)"
+            )
+        got = [rec[c] or "" for c in dims]
+        if got != parts:
+            raise RatesError(f"{where}: series {'.'.join(got)!r}, not {'.'.join(parts)!r}")
+        d = _date(rec["TIME_PERIOD"] or "", "%Y-%m-%d", where)
+        unit = (rec.get("BBK_UNIT") or "").strip() or None
+        _put(rows, d, Row(_value(rec["OBS_VALUE"] or "", where), unit, None), where)
+    return rows, freq is not None
+
+
 FORMATS: dict[str, Format] = {
     "fred": Format("fred", 1, _fred_url, _fred_parse, _no_key_check),
     "ecb": Format("ecb", 1, _ecb_url, _ecb_parse, _ecb_check),
@@ -1066,6 +1133,7 @@ FORMATS: dict[str, Format] = {
     "swea": Format("swea", 1, _swea_url, _swea_parse, _plain_key_check, "json"),
     "swestr": Format("swestr", 1, _swestr_url, _swestr_parse, _plain_key_check, "json"),
     "norges": Format("norges", 1, _norges_url, _norges_parse, _norges_check),
+    "bundesbank": Format("bundesbank", 1, _bundesbank_url, _bundesbank_parse, _bundesbank_check),
 }
 
 
