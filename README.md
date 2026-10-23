@@ -893,6 +893,7 @@ series):
 | `swea` | Sveriges Riksbank SWEA API, JSON | the series id |
 | `swestr` | Sveriges Riksbank SWESTR API, JSON | the SWESTR id |
 | `norges` | Norges Bank SDMX data API, SDMX-CSV (`format=sdmx-csv&labels=id`) | `{flow}/{series key}`, one series: a code for every dimension of the flow (no wildcard, no `+`, no short key) |
+| `bundesbank` | Deutsche Bundesbank time-series database, SDMX web service (`api.statistiken.bundesbank.de`), SDMX-CSV (`format=sdmx_csv&lang=en`) | `{flow}/{series key}`, one series: a code for every dimension of the flow (no empty part, no `+`, no `*`, no short key) |
 
 The workbook formats read the publisher's table layout: `rba-xls` the same
 metadata rows as the RBA CSV (`Frequency`, `Units`, `Publication date`,
@@ -913,6 +914,25 @@ drops the rows dated before it: they are not read, and they are not gaps. A
 cell that is not a decimal number (for example a range such as `1.00 to
 1.50`) refuses the series, with its line; a `start` after that row lets the
 rest of the column in.
+
+**The Bundesbank format.** `bundesbank` asks for
+`https://api.statistiken.bundesbank.de/rest/data/{flow}/{series key}?format=sdmx_csv&lang=en`,
+the series key as the time-series database shows it after the flow (the part
+of the time-series code after the first `.`). The service reads an empty key
+part as a wildcard and `+` as a list of codes, so the format refuses such a
+key before it asks: one fetch is one series. Each row must name the flow
+(`DATAFLOW` `BBK:{flow}(version)`), the key's codes and a daily frequency (the
+frequency dimension, such as `BBK_STD_FREQ`, `D` or `B`; a `TIME_FORMAT`
+other than `P1D` is refused). The service lists weekends and holidays with
+`OBS_VALUE` `.` (`OBS_STATUS` `K`, "No value available"): each such day is a
+gap `missing_in_source`, never a value. The unit is `BBK_UNIT`, as the
+service writes it. An unknown series answers HTTP 404, and nothing is
+written. Terms: the Bundesbank applies the ESCB
+[terms of use regarding the reuse of ESCB statistics](https://www.bundesbank.de/en/homepage/user-information/terms-of-use-regarding-the-reuse-of-escb-statistics-621188)
+(read 2026-10-23): published statistics may be reused free of charge, also
+for commercial use, on the condition that the source is quoted and the
+statistics (including metadata) are not modified; third-party data need the
+originator's permission. The store keeps the source's values unchanged.
 
 **A local file.** `url` may be a `file:` URL, for a publisher that refuses
 scripted downloads (the RBNZ site does from some networks). Download the
@@ -936,12 +956,14 @@ default, or `all`) and `start` (the first date to ask for, where the format
 allows it). Only daily series are accepted: a download whose dates or stated
 frequency are not daily is refused, and the refusal names the source and the
 series key. A format that states no frequency (`fred`, `boe`, `rbnz`, `snb`,
-`swea`, `swestr`, a `boc` series without a `dateFormat`, or an `rba` or
-`rba-xls` column without a `Frequency` row) is judged by its dates: the median
+`swea`, `swestr`, a `boc` series without a `dateFormat`, a `bundesbank` flow
+without a frequency dimension, or an `rba` or `rba-xls` column without a
+`Frequency` row) is judged by its dates: the median
 step between dated rows must be 4 days or fewer (a weekend plus a holiday),
 and one dated row is not enough to tell; an `snb` date that is not a day
 (`YYYY-MM`) is refused at once. A download that states a daily frequency
-(`ecb`, `boj`, `norges` `FREQ` `B` or `D`, `boc` `dateFormat` `daily`, or an
+(`ecb`, `boj`, `norges` `FREQ` `B` or `D`, `bundesbank` frequency dimension
+`B` or `D`, `boc` `dateFormat` `daily`, or an
 `rba` or `rba-xls` column with `Frequency` `Daily`) is accepted with one dated
 row. A weekly or monthly series is refused before anything is written.
 
@@ -965,7 +987,7 @@ directories that start with `_`, so they do not see this area.
   `Publication date`; `rbnz`: the `Published Date`; `snb`: the cube's
   `PublishingDate`; `swestr`: the UTC date of each day's `publicationTime`).
   It is empty when the source states none (`fred`, `ecb`, `boe`, `boc`,
-  `swea`, `norges`); the fetch
+  `swea`, `norges`, `bundesbank`); the fetch
   time in `_fetches.jsonl` is then the only time on record.
 - **`revised`** is `true` when an earlier fetch held another value for the
   date.
