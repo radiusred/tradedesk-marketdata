@@ -249,6 +249,45 @@ def test_a_refused_join_on_a_later_fetch_leaves_the_series_as_it_was(tmp_path):
     assert after == before
 
 
+def test_a_current_month_file_with_no_value_yet_joins_and_verifies(tmp_path):
+    # Review of PR #124: before the first value of a month the current-month file holds
+    # only "-" for the tenor. Its days are gaps; the fetch and the rebuild accept it.
+    cur = mof_file("Interest Rate (January 2024)", ["2024/1/1,-,-,-"])
+    with pytest.raises(r.RatesError, match="holds no value"):
+        r.parse(cur, CFG)
+    assert r.parse(cur, CFG, need_value=False) == {date(2024, 1, 1): r.Row(None, "%", None)}
+    result, _ = fetch(tmp_path, ALL, cur)
+    assert result.status == "updated"
+    assert csv_rows(sdir(tmp_path) / r.OBSERVATIONS)[-1][0] == "2023-12-29"
+    assert csv_rows(sdir(tmp_path) / r.GAPS)[-1] == ["2024-01-01", "missing_in_source"]
+    assert not r.verify_series(tmp_path, CFG.id).failed
+
+
+def test_files_with_no_value_together_are_refused_and_nothing_is_written(tmp_path):
+    all_dash = mof_file("Interest Rate", ["2023/12/29,1,-,1"])  # no 7Y row is read
+    cur_dash = mof_file("Interest Rate (January 2024)", ["2024/1/1,-,-,-"])
+    with pytest.raises(r.RatesError, match="the download holds no value"):
+        fetch(tmp_path, all_dash, cur_dash)
+    assert not (tmp_path / r.AREA).exists()
+
+
+def test_the_downloads_of_one_fetch_must_hold_a_value(tmp_path, monkeypatch):
+    # No MOF all-dates file has rows but no value (rows before a first value are not
+    # read), so the combined check is shown with a stubbed reader.
+    blank = mof_file("Interest Rate", ["2023/12/29,1,-,1"])
+    real = r._mof_read
+
+    def read(body, cfg):
+        got = real(body, cfg)
+        return r._MofFile(got.month, got.rows or {date(2023, 12, 29): r.Row(None, "%", None)})
+
+    monkeypatch.setattr(r, "_mof_read", read)
+    cur_dash = mof_file("Interest Rate (January 2024)", ["2024/1/1,-,-,-"])
+    with pytest.raises(r.RatesError, match="the downloads hold no value"):
+        fetch(tmp_path, blank, cur_dash)
+    assert not (tmp_path / r.AREA).exists()
+
+
 def test_the_joined_rows_must_be_daily(tmp_path):
     weekly = mof_file("Interest Rate", ["2023/12/1,1,1,1", "2023/12/8,1,1,1", "2023/12/15,1,1,1"])
     cur = mof_file("Interest Rate (January 2024)", ["2024/1/5,1,1,1"])
