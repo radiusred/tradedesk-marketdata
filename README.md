@@ -861,7 +861,9 @@ tradedesk-md-rescale --cache-dir ./cache --symbols USDJPY
 
 Days whose median cannot be reconciled to a power of ten of the dominant
 scale are reported as `unfixable`; delete and re-export those with the
-matching scale.
+matching scale. `--tolerance-log10` (default `0.18`, about ±50%) sets the
+match: a day is on the dominant scale when
+`abs(log10(day_median * factor / dominant)) < tolerance`.
 
 ---
 
