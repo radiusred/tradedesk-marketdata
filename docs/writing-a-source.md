@@ -13,7 +13,9 @@ Everything every source shares is the framework's, in
 `tradedesk_marketdata/export.py`. That covers:
 - the day-file cache and its layout;
 - tick to 1-minute candles, split per UTC day;
-- the scale sentry and the atomic commit;
+- the bad-tick rule, applied to each decoded unit's ticks;
+- the earliest-date floor (`_floor.json`): no day before it is planned;
+- the scale sentry and the atomic commit, and `--reexport` of one day;
 - the `_sources.jsonl` and `_partial_days.jsonl` manifests;
 - the range CSVs;
 - the fetch pool, progress and cancellation.
@@ -37,7 +39,7 @@ A source is a `Source` subclass:
 | `__init__(options)` | receives `{dest: value}` for its options (`None` when not given; apply your own default). Raise `SourceError` for unusable configuration; the CLI reports it as a usage error |
 | `check_symbol(symbol)` | raise `SourceError` for a symbol you cannot serve. It is called before any request |
 | `describe(symbol)` | a `SourceDescription(price_divisor, params)` for the `.meta.json` sidecar, where cache price = source price / `price_divisor` |
-| `open(ctx)` | starts one symbol's export and returns a `SourceRun`. `ctx` is a `RunContext`: symbol, range, cache directory, `commit_partial_after_days`, timeout, retries, `keep_raw` |
+| `open(ctx)` | starts one symbol's export and returns a `SourceRun`. `ctx` is a `RunContext`: symbol, range, cache directory, `commit_partial_after_days`, timeout, retries, `keep_raw`, `refetch` (fetch every unit from the provider, not from a staged or kept copy; set by `tradedesk-md-refresh` when it rechecks a day; a source whose published units never change may ignore it) |
 | `action(request)` | optional: a command that replaces the export (Dukascopy's `--probe`). Return an exit status, or `None` to export |
 
 The framework drives the `SourceRun` for one symbol:
