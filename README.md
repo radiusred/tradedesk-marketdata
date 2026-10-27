@@ -719,6 +719,13 @@ symbol in the store that the HistData symbol map holds):
    `--connect-timeout`, `--read-timeout` and `--retries` options apply to both
    sources. Without `--fallback-source`, no Dukascopy request is made.
 
+`--commit-partial-after-days` (default `7`), `--bad-tick-max-jump` (default
+`0.1`), `--bad-tick-window` (default `5`) and `--log-level` (default `info`)
+mean what they mean for `tradedesk-md-export`, and apply to both sources.
+`--symbol-map` is HistData's symbol map (see
+[The symbol map](#the-symbol-map---symbol-map)); it also decides which store
+symbols are refreshed.
+
 **Raw units (`--keep-raw`).** By default each source deletes its fetched raw
 units once every day they feed is committed. With `--keep-raw`, the primary
 source and the fallback move them to `{cache}/{SYMBOL}/_raw/{source}/` instead,
@@ -807,7 +814,8 @@ The last line of output is the run's summary, `tradedesk-md-refresh: no
 change: …` when nothing changed. Exit status: `0` when the run completed (days
 still empty are reported, not an error); `1` when a day was refused, a
 symbol's refresh failed, or the run was refused before any change (for
-example a `--backup-dir` inside the store); `2` on a usage error.
+example a `--backup-dir` inside the store); `2` on a usage error; `130` after
+Ctrl-C.
 
 ### Normalizing prices into their expected band (`tradedesk-md-normalize`)
 
@@ -988,7 +996,8 @@ Optional keys: `url` (instead of the format's default URL), `unit` (for a
 source that states none, such as `fred`, `boe`, `snb`, `swea` and `swestr`; a unit the source states
 wins, and a different `unit` is an error), `calendar` (`weekdays`, the
 default, or `all`) and `start` (the first date to ask for, where the format
-allows it). Only daily series are accepted: a download whose dates or stated
+allows it; without it `boe` asks from 1950-01-01, and `swea` and `swestr` from
+1900-01-01). Only daily series are accepted: a download whose dates or stated
 frequency are not daily is refused, and the refusal names the source and the
 series key. A format that states no frequency (`fred`, `boe`, `rbnz`, `snb`,
 `swea`, `swestr`, a `boc` series without a `dateFormat`, a `bundesbank` flow
@@ -1059,10 +1068,15 @@ Only `tradedesk-md-rates` writes this area.
 stored file. It writes nothing. Without `--series` it checks every series in
 the area. A raw file that has no fetch line is a warning, not a failure.
 
+`fetch --series ID ...` fetches only those ids from `--config`. `fetch` also
+takes `--connect-timeout` (default `2`), `--read-timeout` (default `10`) and
+`--retries` (default `3`), per download, as for the export.
+
 Both commands take `--format text|json`. Exit status: `0` when every series
 fetched or verified; `1` when a series failed (a download that did not arrive
 or did not parse, a missing or changed raw file, a file the raw files do not
-reproduce); `2` on a usage error, including a configuration that is not valid.
+reproduce); `2` on a usage error, including a configuration that is not valid;
+`130` after Ctrl-C.
 
 ---
 
@@ -1177,9 +1191,10 @@ Only `tradedesk-md-dividends` writes this area.
 
 As for the rate series: `tradedesk-md-dividends verify` re-hashes each raw
 file, rebuilds the three files and compares them byte for byte. It writes
-nothing. Both commands take `--format text|json`, and the exit status is the
-same: `0` when every series fetched or verified; `1` when a series failed; `2`
-on a usage error, including a configuration that is not valid.
+nothing. Both commands take `--format text|json` and `--series ID ...`, `fetch`
+takes the same timeout and retry options, and the exit status is the same: `0`
+when every series fetched or verified; `1` when a series failed; `2` on a usage
+error, including a configuration that is not valid; `130` after Ctrl-C.
 
 ---
 
@@ -1307,10 +1322,12 @@ As for the rate series: `tradedesk-md-calendars verify` re-hashes each raw
 file, rebuilds `events.csv`, `withdrawn.csv` and `manifest.json` from the raw
 files and compares them byte for byte. It writes nothing, and it warns about
 a raw file with no fetch line. Both commands take `--format text|json` and
-select calendars with `--calendar ID ...`. The exit status is that of the
+select calendars with `--calendar ID ...`. `fetch` takes the same timeout and
+retry options as `tradedesk-md-rates fetch`, and `--user-agent TEXT` (see
+[Terms of use](#terms-of-use-1)). The exit status is that of the
 other reference-data tools: `0` when every calendar fetched or verified; `1`
 when a calendar failed; `2` on a usage error, including a configuration that
-is not valid.
+is not valid; `130` after Ctrl-C.
 
 ---
 
@@ -1505,7 +1522,10 @@ will not emit the final range-level output CSVs in `--out`.
 ## Requirements
 
 - Python 3.11+
-- Internet access to the Dukascopy datafeed or HistData.com
+- Internet access to the Dukascopy datafeed or HistData.com, and to the
+  publishers named in a reference-data configuration (none for `file:` URLs)
+- `xlrd` for the `.xls` formats (`rba-xls`, `shiller`):
+  `pip install 'tradedesk-marketdata[xls]'`
 
 ## Credentials and Release Automation
 
